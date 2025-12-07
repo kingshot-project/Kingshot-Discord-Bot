@@ -7,6 +7,16 @@ import re
 import traceback
 
 def format_repeat_interval(repeat_minutes, notification_id=None) -> str:
+    # Normalize repeat_minutes to handle both string and int values from database
+    if isinstance(repeat_minutes, str):
+        if repeat_minutes == "fixed":
+            repeat_minutes = "fixed"
+        else:
+            try:
+                repeat_minutes = int(repeat_minutes)
+            except (ValueError, TypeError):
+                return "Invalid repeat interval"
+
     if repeat_minutes == 0:
         return "❌ No repeat"
 

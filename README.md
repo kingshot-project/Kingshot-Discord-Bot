@@ -1,4 +1,4 @@
-# Kingshot Discord Bot
+# :crown: Kingshot Discord Bot
 
 Kingshot Discord Bot that supports alliance management, event reminders and attendance tracking, gift code redemption, minister appointment planning and more. This bot is free, open source and self-hosted. It is specifically designed for [Kingshot](https://www.centurygames.com/games/kingshot/).
 

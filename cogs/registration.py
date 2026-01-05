@@ -142,7 +142,7 @@ class Register(commands.Cog):
         session = aiohttp.ClientSession()
         
         data_nosign = f"fid={fid}&time={time.time_ns()}"
-        sign = hashlib.md5((data_nosign + "tB87#kPtkxqOS2").encode()).hexdigest()
+        sign = hashlib.md5((data_nosign + "mN4!pQs6JrYwV9").encode()).hexdigest()
         data = f"sign={sign}&{data_nosign}"
 
         try:

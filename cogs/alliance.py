@@ -1,9 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import sqlite3  
+import sqlite3
 import asyncio
 from datetime import datetime
+from .permission_handler import PermissionManager
 
 class Alliance(commands.Cog):
     def __init__(self, bot, conn):
@@ -47,18 +48,17 @@ class Alliance(commands.Cog):
             return
 
         user_id = interaction.user.id
-        self.c_settings.execute("SELECT id, is_initial FROM admin WHERE id = ?", (user_id,))
-        admin = self.c_settings.fetchone()
+        guild_id = interaction.guild.id
 
-        if admin is None:
+        # Use centralized permission check
+        is_admin, is_global = PermissionManager.is_admin(user_id)
+        if not is_admin:
             await interaction.response.send_message("You do not have permission to view alliances.", ephemeral=True)
             return
 
-        is_initial = admin[1]
-        guild_id = interaction.guild.id
-
         try:
-            if is_initial == 1:
+            if is_global:
+                # Global admin - show all alliances
                 query = """
                     SELECT a.alliance_id, a.name, COALESCE(s.interval, 0) as interval
                     FROM alliance_list a
@@ -67,14 +67,27 @@ class Alliance(commands.Cog):
                 """
                 self.c.execute(query)
             else:
-                query = """
+                # Get alliance IDs using centralized permission manager
+                alliance_ids, _ = PermissionManager.get_admin_alliance_ids(user_id, guild_id)
+
+                if not alliance_ids:
+                    embed = discord.Embed(
+                        title="Existing Alliances",
+                        description="No alliances found for your permissions.",
+                        color=discord.Color.blue()
+                    )
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
+                    return
+
+                placeholders = ','.join('?' * len(alliance_ids))
+                query = f"""
                     SELECT a.alliance_id, a.name, COALESCE(s.interval, 0) as interval
                     FROM alliance_list a
                     LEFT JOIN alliancesettings s ON a.alliance_id = s.alliance_id
-                    WHERE a.discord_server_id = ?
+                    WHERE a.alliance_id IN ({placeholders})
                     ORDER BY a.alliance_id ASC
                 """
-                self.c.execute(query, (guild_id,))
+                self.c.execute(query, alliance_ids)
 
             alliances = self.c.fetchall()
 
@@ -357,27 +370,26 @@ class Alliance(commands.Cog):
                         color=discord.Color.blue()
                     )
                     
+                    # All admins (global and server) can manage alliances
+                    # Server admins are scoped to their server's alliances in the handlers
                     view = discord.ui.View()
                     view.add_item(discord.ui.Button(
-                        label="Add Alliance", 
+                        label="Add Alliance",
                         emoji="➕",
-                        style=discord.ButtonStyle.success, 
-                        custom_id="add_alliance", 
-                        disabled=admin[1] != 1
+                        style=discord.ButtonStyle.success,
+                        custom_id="add_alliance"
                     ))
                     view.add_item(discord.ui.Button(
-                        label="Edit Alliance", 
+                        label="Edit Alliance",
                         emoji="✏️",
-                        style=discord.ButtonStyle.primary, 
-                        custom_id="edit_alliance", 
-                        disabled=admin[1] != 1
+                        style=discord.ButtonStyle.primary,
+                        custom_id="edit_alliance"
                     ))
                     view.add_item(discord.ui.Button(
-                        label="Delete Alliance", 
+                        label="Delete Alliance",
                         emoji="🗑️",
-                        style=discord.ButtonStyle.danger, 
-                        custom_id="delete_alliance", 
-                        disabled=admin[1] != 1
+                        style=discord.ButtonStyle.danger,
+                        custom_id="delete_alliance"
                     ))
                     view.add_item(discord.ui.Button(
                         label="View Alliances", 
@@ -401,9 +413,6 @@ class Alliance(commands.Cog):
                     await interaction.response.edit_message(embed=embed, view=view)
 
                 elif custom_id == "edit_alliance":
-                    if admin[1] != 1:
-                        await interaction.response.send_message("You do not have permission to perform this action.", ephemeral=True)
-                        return
                     await self.edit_alliance(interaction)
 
                 elif custom_id == "check_alliance":
@@ -627,15 +636,9 @@ class Alliance(commands.Cog):
                             )
 
                 elif custom_id == "add_alliance":
-                    if admin[1] != 1:
-                        await interaction.response.send_message("You do not have permission to perform this action.", ephemeral=True)
-                        return
                     await self.add_alliance(interaction)
 
                 elif custom_id == "delete_alliance":
-                    if admin[1] != 1:
-                        await interaction.response.send_message("You do not have permission to perform this action.", ephemeral=True)
-                        return
                     await self.delete_alliance(interaction)
 
                 elif custom_id == "view_alliances":
@@ -825,14 +828,36 @@ class Alliance(commands.Cog):
             await modal.interaction.response.send_message(embed=error_embed, ephemeral=True)
 
     async def edit_alliance(self, interaction: discord.Interaction):
-        self.c.execute("""
-            SELECT a.alliance_id, a.name, COALESCE(s.interval, 0) as interval, COALESCE(s.channel_id, 0) as channel_id 
-            FROM alliance_list a 
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id
+
+        # Get alliances this admin can access
+        admin_alliances, is_global = PermissionManager.get_admin_alliances(user_id, guild_id)
+
+        if not admin_alliances:
+            no_alliance_embed = discord.Embed(
+                title="❌ No Alliances Found",
+                description="You don't have access to any alliances.",
+                color=discord.Color.red()
+            )
+            return await interaction.response.send_message(embed=no_alliance_embed, ephemeral=True)
+
+        # Fetch full alliance details for the ones admin can access
+        alliance_ids = [a[0] for a in admin_alliances]
+        placeholders = ','.join('?' * len(alliance_ids))
+        self.c.execute(f"""
+            SELECT a.alliance_id, a.name, COALESCE(s.interval, 0) as interval, COALESCE(s.channel_id, 0) as channel_id
+            FROM alliance_list a
             LEFT JOIN alliancesettings s ON a.alliance_id = s.alliance_id
+            WHERE a.alliance_id IN ({placeholders})
             ORDER BY a.alliance_id ASC
-        """)
+        """, alliance_ids)
         alliances = self.c.fetchall()
-        
+
         if not alliances:
             no_alliance_embed = discord.Embed(
                 title="❌ No Alliances Found",
@@ -1062,9 +1087,28 @@ class Alliance(commands.Cog):
 
     async def delete_alliance(self, interaction: discord.Interaction):
         try:
-            self.c.execute("SELECT alliance_id, name FROM alliance_list ORDER BY name")
-            alliances = self.c.fetchall()
-            
+            if interaction.guild is None:
+                await interaction.response.send_message("❌ This command must be used in a server.", ephemeral=True)
+                return
+
+            user_id = interaction.user.id
+            guild_id = interaction.guild.id
+
+            # Get alliances this admin can access
+            admin_alliances, is_global = PermissionManager.get_admin_alliances(user_id, guild_id)
+
+            if not admin_alliances:
+                no_alliance_embed = discord.Embed(
+                    title="❌ No Alliances Found",
+                    description="You don't have access to any alliances.",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=no_alliance_embed, ephemeral=True)
+                return
+
+            # Use the alliances from permission manager (already has id, name)
+            alliances = admin_alliances
+
             if not alliances:
                 no_alliance_embed = discord.Embed(
                     title="❌ No Alliances Found",

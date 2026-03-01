@@ -371,17 +371,24 @@ def calculate_crazy_joe_dates(from_date: Optional[datetime] = None) -> Tuple[Opt
 
     cycle_weeks = 4
 
-    # Calculate next Tuesday
+    # Find the cycle's Tuesday
     weeks_diff = (from_date - reference_tue).days // 7
     if weeks_diff < 0:
-        next_tuesday = reference_tue
+        cycle_tuesday = reference_tue
     else:
         cycles_passed = weeks_diff // cycle_weeks
-        next_tuesday = reference_tue + timedelta(weeks=cycles_passed * cycle_weeks)
-        if next_tuesday <= from_date:
-            next_tuesday += timedelta(weeks=cycle_weeks)
+        cycle_tuesday = reference_tue + timedelta(weeks=cycles_passed * cycle_weeks)
 
-    next_thursday = next_tuesday + timedelta(days=2)
+    cycle_thursday = cycle_tuesday + timedelta(days=2)
+
+    # Independently advance each day only if strictly in the past
+    next_tuesday = cycle_tuesday
+    if next_tuesday.date() < from_date.date():
+        next_tuesday += timedelta(weeks=cycle_weeks)
+
+    next_thursday = cycle_thursday
+    if next_thursday.date() < from_date.date():
+        next_thursday += timedelta(weeks=cycle_weeks)
 
     return next_tuesday, next_thursday
 

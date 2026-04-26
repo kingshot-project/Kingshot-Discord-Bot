@@ -133,7 +133,7 @@ class Register(commands.Cog):
         HEADERS = {"Content-Type": "application/x-www-form-urlencoded"}
         
         ssl_context = ssl.create_default_context()
-        session = aiohttp.ClientSession()
+        session = aiohttp.ClientSession(trust_env=True)
         
         data_nosign = f"fid={fid}&time={time.time_ns()}"
         sign = hashlib.md5((data_nosign + "mN4!pQs6JrYwV9").encode()).hexdigest()

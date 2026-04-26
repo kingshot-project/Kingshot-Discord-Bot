@@ -80,7 +80,7 @@ class WCommand(commands.Cog):
             retry_delay = 60
 
             for attempt in range(max_retries):
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(trust_env=True) as session:
                     async with session.post(url, headers=headers, data=form, ssl=ssl_context) as response:
                         if response.status == 200:
                             data = await response.json()

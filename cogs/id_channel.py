@@ -209,7 +209,7 @@ class IDChannel(commands.Cog):
                     ssl_context.check_hostname = False
                     ssl_context.verify_mode = ssl.CERT_NONE
 
-                    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+                    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context), trust_env=True) as session:
                         async with session.post('https://kingshot-giftcode.centurygame.com/api/player', headers=headers, data=form) as response:
                             if response.status == 429:
                                 if attempt < max_retries - 1:

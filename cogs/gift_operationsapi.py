@@ -158,7 +158,7 @@ class GiftCodeAPI:
             db_codes = {row[0]: (row[1], row[2]) for row in self.cursor.fetchall()}
             
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 headers = {
                     'X-API-Key': self.api_key,
                     'Content-Type': 'application/json'
@@ -523,7 +523,7 @@ class GiftCodeAPI:
                 return True
             
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 headers = {
                     'Content-Type': 'application/json',
                     'X-API-Key': self.api_key
@@ -592,7 +592,7 @@ class GiftCodeAPI:
             
             self.logger.info(f"Removing invalid code {giftcode} from API")
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 headers = {
                     'Content-Type': 'application/json',
                     'X-API-Key': self.api_key
@@ -635,7 +635,7 @@ class GiftCodeAPI:
         """Check if a gift code exists in the API."""
         try:
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 headers = {
                     'X-API-Key': self.api_key
                 }

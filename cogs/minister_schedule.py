@@ -205,7 +205,7 @@ class MinisterSchedule(commands.Cog):
 
         try:
             connector = ProxyConnector.from_url(proxy) if proxy else None
-            async with aiohttp.ClientSession(connector=connector) as session:
+            async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
                 async with session.post(url, headers=headers, data=form, ssl=False) as response:
                     if response.status == 200:
                         return await response.json()

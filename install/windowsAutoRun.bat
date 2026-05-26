@@ -44,9 +44,26 @@ IF EXIST install.py (
 )
 
 :installKS
-	curl -o main.py https://raw.githubusercontent.com/kingshot-project/Kingshot-Discord-Bot/main/main.py
-	curl -o requirements.txt https://raw.githubusercontent.com/kingshot-project/Kingshot-Discord-Bot/main/requirements.txt
-	goto :venvCheck
+IF EXIST install.py (
+	py install.py
+	cls
+	echo Woohoo! First install step done, I will make a virtual enviroment now.
+	echo Be patient, this takes a minute...
+	py -m venv bot_venv
+	cls
+	echo The enviroment is created, I will continue with the initial startup.
+	echo Ignore the scary text in blue you see later, it's all good, I promise!
+	echo :
+	echo Ready for the next step?
+	timeout 10
+	goto :startUpCheck
+	) ELSE (
+	echo :
+	echo I will download the latest install.py from GitHub...
+	timeout 5
+	curl -o install.py https://raw.githubusercontent.com/kingshot-project/Kingshot-Discord-Bot/main/install/install.py
+	goto :installKS
+)
 
 :venvCheck
 IF EXIST bot_venv\ (
@@ -80,6 +97,6 @@ IF EXIST bot_venv\ (
 	cls
 	echo For what game do you want to install the discord bot?
 	set /P INPUTA= For Whiteout survival type 1, for kingshot type 2: 
-	If /I “%INPUTA%”==“1” goto installWOS
-	If /I “%INPUTA%”==“2” goto installKS
+	If /I "%INPUTA%"=="1" goto installWOS
+	If /I "%INPUTA%"=="2" goto installKS
 	echo Incorrect input & goto questionVersion

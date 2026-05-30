@@ -245,7 +245,7 @@ class AllianceHistory(commands.Cog):
         """)
         self.conn.commit()
 
-    def cog_unload(self):
+    async def cog_unload(self):
         if hasattr(self, 'cursor'):
             self.cursor.close()
         if hasattr(self, 'conn'):
@@ -305,7 +305,7 @@ class AllianceHistory(commands.Cog):
                 alliance_id = user_info[2] if user_info else None
 
             embed = discord.Embed(
-                title=f"{theme.levelIcon} Town Center Level History",
+                title=f"{theme.stoveIcon} Town Center Level History",
                 description=(
                     f"**Player:** `{nickname}`\n"
                     f"**ID:** `{fid}`\n"
@@ -1546,7 +1546,7 @@ class RecentChangesView(discord.ui.View):
 
     def get_embed(self):
         embed = discord.Embed(
-            title=f"{theme.levelIcon} Recent Level Changes - {self.alliance_name}",
+            title=f"{theme.stoveIcon} Recent Level Changes - {self.alliance_name}",
             description=(
                 f"Showing changes in the last {self.time}\n"
                 f"{theme.upperDivider}\n"

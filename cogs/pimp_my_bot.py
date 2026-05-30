@@ -93,9 +93,9 @@ ICON_NAMES = [icon for icons in ICON_CATEGORIES.values() for icon in icons]
 # Default icon values for reset functionality (matches INSERT statement defaults)
 DEFAULT_ICON_VALUES = {
     # Old icons for change tracking
-    'allianceOldIcon': '⚔️', 'avatarOldIcon': '👤', 'stoveOldIcon': '🔥', 'stateOldIcon': '🌏',
+    'allianceOldIcon': '⚔️', 'avatarOldIcon': '👤', 'stoveOldIcon': '🏰', 'stateOldIcon': '🌏',
     # Current icons
-    'allianceIcon': '⚔️', 'avatarIcon': '👤', 'stoveIcon': '🔥', 'stateIcon': '🌏',
+    'allianceIcon': '⚔️', 'avatarIcon': '👤', 'stoveIcon': '🏰', 'stateIcon': '🌏',
     'listIcon': '📜', 'fidIcon': '🆔', 'timeIcon': '🕰️', 'homeIcon': '🏠',
     'num1Icon': '1️⃣', 'num2Icon': '2️⃣', 'num3Icon': '3️⃣', 'num4Icon': '4️⃣',
     'num5Icon': '5️⃣', 'num10Icon': '🔟', 'newIcon': '🆕', 'pinIcon': '📍',
@@ -280,7 +280,6 @@ class ThemeManager:
                 # If bot can't access this emoji, set to empty string (hidden)
                 if emoji_id not in accessible_emoji_ids:
                     logger.warning(f"Theme emoji '{icon_name}' (:{emoji_name}:{emoji_id}) is inaccessible - hiding it")
-                    print(f"[WARNING] Theme emoji '{icon_name}' (:{emoji_name}:{emoji_id}) is inaccessible - hiding it")
                     setattr(self, icon_name, "")
 
     def _set_defaults(self):
@@ -462,8 +461,8 @@ class ThemeManager:
                         headerColor1, headerColor2
                     ) VALUES (
                         'default', '@WOSLand', 1,
-                        '⚔️', '👤', '🔥', '🌏',
-                        '⚔️', '👤', '🔥', '🌏',
+                        '⚔️', '👤', '🏰', '🌏',
+                        '⚔️', '👤', '🏰', '🌏',
                         '📜', '🆔', '🕰️', '🏠',
                         '1️⃣', '2️⃣', '3️⃣', '4️⃣',
                         '5️⃣', '🔟', '🆕', '📍',
@@ -507,7 +506,6 @@ class ThemeManager:
                 """)
                 conn.commit()
                 logger.info("Theme database created with default theme.")
-                print("Theme database created with default theme.")
 
     def load(self):
         """Load theme from database. Safe to call multiple times."""
@@ -2654,8 +2652,8 @@ class Theme(commands.Cog):
     def _build_default_theme_lines(self):
         """Build default theme lines with Twemoji CDN URLs."""
         default_icons = {
-            'allianceOldIcon': '2694', 'avatarOldIcon': '1f464', 'stoveOldIcon': '1f525', 'stateOldIcon': '1f30f',
-            'allianceIcon': '2694', 'avatarIcon': '1f464', 'stoveIcon': '1f525', 'stateIcon': '1f30f',
+            'allianceOldIcon': '2694', 'avatarOldIcon': '1f464', 'stoveOldIcon': '1f3f0', 'stateOldIcon': '1f30f',
+            'allianceIcon': '2694', 'avatarIcon': '1f464', 'stoveIcon': '1f3f0', 'stateIcon': '1f30f',
             'listIcon': '1f4dc', 'fidIcon': '1f194', 'timeIcon': '1f570', 'homeIcon': '1f3e0',
             'num1Icon': '31-20e3', 'num2Icon': '32-20e3', 'num3Icon': '33-20e3', 'num4Icon': '34-20e3',
             'num5Icon': '35-20e3', 'num10Icon': '1f51f', 'newIcon': '1f195', 'pinIcon': '1f4cd',

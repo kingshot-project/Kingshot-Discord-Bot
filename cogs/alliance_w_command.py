@@ -30,7 +30,7 @@ class WCommand(commands.Cog):
             80: "TC 10", 81: "TC 10-1", 82: "TC 10-2", 83: "TC 10-3", 84: "TC 10-4"
         }
 
-    def cog_unload(self):
+    async def cog_unload(self):
         if hasattr(self, 'conn'):
             self.conn.close()
 

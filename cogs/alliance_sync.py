@@ -258,25 +258,26 @@ class AllianceSync(commands.Cog):
         else:
             return {'error': result.get('error_message', 'Unknown error'), 'fid': fid}
 
-    async def remove_invalid_fid(self, fid: str, reason: str):
+    async def remove_invalid_fid(self, fid: str, reason: str) -> tuple[bool, str | None]:
         """Safely remove an invalid ID from the database with logging"""
         try:
             async with self.db_lock:
                 # Get user info before deletion for logging
                 self.cursor_users.execute("SELECT nickname, alliance FROM users WHERE fid = ?", (fid,))
                 user_info = self.cursor_users.fetchone()
-                
+
                 if user_info:
                     nickname, alliance_id = user_info
-                    
+
                     # Delete from users table
                     self.cursor_users.execute("DELETE FROM users WHERE fid = ?", (fid,))
                     self.conn_users.commit()
-                    
+
                     # Log the deletion to alliance control log
                     self.logger.warning(f"[AUTO-CLEANUP] Removed invalid ID {fid} (nickname: {nickname}) - Reason: {reason}")
-                    
+
                     return True, nickname
+                return False, None
         except Exception as e:
             self.logger.error(f"Failed to remove invalid ID {fid}: {str(e)}")
             return False, None
@@ -529,8 +530,8 @@ class AllianceSync(commands.Cog):
         removal_count = len(members_to_remove)
         removal_percentage = (removal_count / total_users * 100) if total_users > 0 else 0
 
-        # Only apply safeguard if alliance has at least 5 members and would remove >20%
-        if total_users >= 5 and removal_percentage > 20:
+        # Cap applies regardless of alliance size — small alliances are the case this guards.
+        if removal_percentage > 20:
             self.logger.error(f"BULK REMOVAL BLOCKED: Attempted to remove {removal_count}/{total_users} members ({removal_percentage:.1f}%) from alliance {alliance_id}")
 
             # Send alert to channel
@@ -583,7 +584,7 @@ class AllianceSync(commands.Cog):
             if furnace_changes:
                 await self.send_embed(
                     channel=channel,
-                    title=f"{theme.levelIcon} **{alliance_name}** Town Center Level Changes",
+                    title=f"{theme.stoveIcon} **{alliance_name}** Town Center Level Changes",
                     description=safe_list(furnace_changes),
                     color=discord.Color.orange(),
                     footer=f"{theme.chartIcon} Total Changes: {len(furnace_changes)}"
@@ -823,7 +824,7 @@ class AllianceSync(commands.Cog):
             return max(0, int(delay_seconds))
         except (ValueError, AttributeError) as e:
             self.logger.error(f"Invalid start_time format '{start_time}': {e}")
-            print(f"[SYNC] Invalid start_time format '{start_time}': {e}")
+            print(f"[ERROR] Invalid start_time format '{start_time}': {e}")
             return interval * 60  # Fall back to interval delay
 
     async def schedule_alliance_check(self, alliance_id):
@@ -832,7 +833,7 @@ class AllianceSync(commands.Cog):
             # Get initial settings
             cached = self.current_task_settings.get(alliance_id)
             if not cached:
-                print(f"[SYNC] No cached settings for alliance {alliance_id}, stopping")
+                self.logger.info(f"No cached settings for alliance {alliance_id}, stopping")
                 return
 
             channel_id, interval, start_time = cached
@@ -847,7 +848,7 @@ class AllianceSync(commands.Cog):
                     # Fetch fresh settings from cache (updated by monitor loop)
                     cached = self.current_task_settings.get(alliance_id)
                     if not cached:
-                        print(f"[SYNC] Alliance {alliance_id} removed from settings, stopping")
+                        self.logger.info(f"Alliance {alliance_id} removed from settings, stopping")
                         break
 
                     channel_id, interval, start_time = cached
@@ -855,7 +856,7 @@ class AllianceSync(commands.Cog):
                     # Get the channel fresh each time
                     channel = self.bot.get_channel(channel_id)
                     if channel is None:
-                        print(f"[SYNC] Channel {channel_id} not found for alliance {alliance_id}")
+                        self.logger.warning(f"Channel {channel_id} not found for alliance {alliance_id}")
                         await asyncio.sleep(60)
                         continue
 
@@ -1031,7 +1032,6 @@ class AllianceSync(commands.Cog):
 
                 if scheduled_alliances:
                     msg = f"Scheduled syncs for {len(scheduled_alliances)} alliance(s): {', '.join(scheduled_alliances)}"
-                    print(f"[SYNC] {msg}")
                     self.logger.info(msg)
 
         except Exception as e:
@@ -1061,7 +1061,7 @@ class AllianceSync(commands.Cog):
 
                     # If interval is 0, stop the task
                     if interval == 0 and task_exists:
-                        print(f"[SYNC] Stopping alliance {alliance_id} - interval set to 0")
+                        self.logger.info(f"Stopping alliance {alliance_id} - interval set to 0")
                         self.is_running[alliance_id] = False
                         if not self.alliance_tasks[alliance_id].done():
                             self.alliance_tasks[alliance_id].cancel()
@@ -1071,16 +1071,15 @@ class AllianceSync(commands.Cog):
                         continue
 
                     # Check if settings changed (channel, interval, or start_time)
-                    settings_changed = cached_settings and cached_settings != (channel_id, interval, start_time)
-                    if settings_changed and task_exists:
+                    settings_changed = cached_settings is not None and cached_settings != (channel_id, interval, start_time)
+                    if settings_changed and task_exists and cached_settings is not None:
                         old_channel, old_interval, old_start = cached_settings
-                        print(f"[SYNC] Settings changed for alliance {alliance_id}:")
-                        if old_channel != channel_id:
-                            print(f"  Channel: {old_channel} -> {channel_id}")
-                        if old_interval != interval:
-                            print(f"  Interval: {old_interval} -> {interval}")
-                        if old_start != start_time:
-                            print(f"  Start time: {old_start} -> {start_time}")
+                        self.logger.info(
+                            f"Settings changed for alliance {alliance_id}: "
+                            f"channel {old_channel}->{channel_id}, "
+                            f"interval {old_interval}->{interval}, "
+                            f"start_time {old_start}->{start_time}"
+                        )
                         # Cancel existing task to restart with new settings
                         self.is_running[alliance_id] = False
                         if not self.alliance_tasks[alliance_id].done():
@@ -1102,7 +1101,7 @@ class AllianceSync(commands.Cog):
                 # Clean up tasks for removed alliances
                 for alliance_id in list(self.alliance_tasks.keys()):
                     if alliance_id not in current_settings:
-                        print(f"[SYNC] Removing task for deleted alliance {alliance_id}")
+                        self.logger.info(f"Removing task for deleted alliance {alliance_id}")
                         self.is_running[alliance_id] = False
                         if not self.alliance_tasks[alliance_id].done():
                             self.alliance_tasks[alliance_id].cancel()

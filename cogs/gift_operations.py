@@ -122,6 +122,10 @@ class GiftOperations(commands.Cog):
 
         self.redemption_batches = {}
 
+        # Near-term re-validation: in-flight backoff tasks + already-redeemed codes (dedup).
+        self._revalidation_tasks = {}
+        self._auto_redeem_started = set()
+
         self.processing_stats = {
             "total_fids_processed": 0,
             "total_processing_time": 0.0
@@ -160,6 +164,9 @@ class GiftOperations(commands.Cog):
     async def cog_unload(self):
         if hasattr(self, 'periodic_validation_loop') and self.periodic_validation_loop.is_running():
             self.periodic_validation_loop.cancel()
+        for task in list(getattr(self, '_revalidation_tasks', {}).values()):
+            if not task.done():
+                task.cancel()
         for conn_name in ['conn', 'settings_conn', 'alliance_conn']:
             if hasattr(self, conn_name):
                 try:
@@ -352,6 +359,9 @@ class GiftOperations(commands.Cog):
 
     async def _process_auto_use(self, giftcode):
         return await gift_redemption._process_auto_use(self, giftcode)
+
+    def schedule_revalidation(self, giftcode, source="unknown"):
+        return gift_redemption.schedule_revalidation(self, giftcode, source)
 
     async def add_manual_redemption_to_queue(self, giftcodes, alliance_ids, interaction):
         return await gift_redemption.add_manual_redemption_to_queue(self, giftcodes, alliance_ids, interaction)

@@ -342,10 +342,6 @@ def calculate_next_occurrence(event_type: str, from_date: Optional[datetime] = N
 
         return next_occurrence
 
-    # Biweekly with two days (Viking Vengeance - Tuesday and Thursday)
-    if schedule_type == "global_biweekly":
-        # This is handled above, but for Viking Vengeance specifically we need both days
-        pass
 
     return None
 

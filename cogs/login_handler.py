@@ -244,39 +244,6 @@ class LoginHandler:
             'error_message': last_error,
         }
 
-    async def fetch_player_batch(self, fids: List[str], progress_callback: Optional[Callable] = None,
-                               alliance_id: Optional[str] = None) -> List[Dict]:
-        """Fetch multiple players efficiently with progress updates."""
-        if alliance_id:
-            async with self.get_alliance_lock(alliance_id):
-                return await self._fetch_batch_internal(fids, progress_callback, len(fids))
-        return await self._fetch_batch_internal(fids, progress_callback, len(fids))
-
-    async def _fetch_batch_internal(self, fids: List[str], progress_callback: Optional[Callable],
-                                  total: int) -> List[Dict]:
-        results = []
-
-        for i, fid in enumerate(fids):
-            if progress_callback:
-                await progress_callback(i + 1, total, f"Fetching player {i + 1}/{total}")
-
-            result = await self.fetch_player_data(fid)
-            results.append(result)
-
-            if result['status'] == 'rate_limited':
-                wait_time = result.get('wait_time', 60)
-                if progress_callback:
-                    await progress_callback(i + 1, total, f"Rate limited. Waiting {wait_time:.1f}s...")
-                await asyncio.sleep(wait_time)
-
-                result = await self.fetch_player_data(fid)
-                results[-1] = result
-
-            if i < total - 1:
-                await asyncio.sleep(self.request_delay)
-
-        return results
-
     def get_mode_text(self, for_console: bool = False) -> str:
         """Human-readable description of current API mode."""
         if self.available_apis:
@@ -290,14 +257,3 @@ class LoginHandler:
             return f"{theme.boltIcon} Rate: 1 member/2 seconds"
         return f"{theme.deniedIcon} Service unavailable"
 
-    def get_rate_limit_info(self) -> Dict[str, int]:
-        now = time.time()
-        self.api1_requests = [t for t in self.api1_requests if now - t < self.rate_limit_window]
-
-        return {
-            'api1_used': len(self.api1_requests),
-            'api1_remaining': self.rate_limit_per_api - len(self.api1_requests),
-            'api2_used': 0,
-            'api2_remaining': 0,
-            'total_available': self.rate_limit_per_api - len(self.api1_requests),
-        }

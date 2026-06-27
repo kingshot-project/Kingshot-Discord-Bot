@@ -14,27 +14,32 @@ from .process_queue import ALLIANCE_CONTROL
 logger = logging.getLogger('alliance')
 
 
-def check_alliance_kingdom(alliance_id: int, player_kid) -> "str | None":
-    """Gate a player-add against the alliance's locked kingdom.
+# Fail-closed denial when the gate can't read the lock (DB busy).
+KINGDOM_CHECK_UNAVAILABLE = (
+    "Could not verify the alliance's kingdom lock right now (database busy). "
+    "Please try again in a moment."
+)
 
-    Returns None when the add is allowed; returns a human-readable reason string
-    when it should be denied. Callers wrap the string with their own icon/embed
-    pattern (typically ``f"{theme.deniedIcon} {reason}"``).
 
-    NULL ``alliance_list.kid`` is treated as "no restriction" so existing installs
-    are unaffected until an admin opts in by setting a kingdom on the alliance.
-    A NULL player kid (API didn't return one) fails closed when the alliance is
-    locked — we can't prove the player belongs.
-    """
+def resolve_alliance_kid(alliance_id: int):
+    """Read the alliance's locked kid -> (ok, kid); ok=False means fail closed."""
     try:
         with sqlite3.connect("db/alliance.sqlite", timeout=30.0) as conn:
             row = conn.execute(
                 "SELECT kid FROM alliance_list WHERE alliance_id = ?", (alliance_id,)
             ).fetchone()
-    except sqlite3.OperationalError:
-        # Pre-migration DB or transient lock; fail open to preserve legacy behaviour.
-        return None
-    alliance_kid = row[0] if row else None
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "no such table" in msg or "no such column" in msg:
+            return True, None  # pre-migration DB: lock feature absent -> unrestricted
+        logger.warning(f"Kingdom gate read failed for alliance {alliance_id}: {e}")
+        print(f"Kingdom gate read failed for alliance {alliance_id}: {e}")
+        return False, None
+    return True, (row[0] if row else None)
+
+
+def kingdom_lock_reason(alliance_kid, player_kid) -> "str | None":
+    """Denial reason for this player kid against a resolved alliance kid, else None."""
     if alliance_kid is None:
         return None
     if player_kid is None:
@@ -54,6 +59,15 @@ def check_alliance_kingdom(alliance_id: int, player_kid) -> "str | None":
         f"Player is in Kingdom #{player_kid}, "
         f"but this alliance is locked to Kingdom #{alliance_kid}."
     )
+
+
+def check_alliance_kingdom(alliance_id: int, player_kid) -> "str | None":
+    """Single-add gate: denial reason for one player kid, else None. Bulk adds
+    should call resolve_alliance_kid once + kingdom_lock_reason per player."""
+    ok, alliance_kid = resolve_alliance_kid(alliance_id)
+    if not ok:
+        return KINGDOM_CHECK_UNAVAILABLE
+    return kingdom_lock_reason(alliance_kid, player_kid)
 
 
 def _alliance_sync_in_flight(process_queue, alliance_id: int) -> bool:
@@ -521,7 +535,7 @@ class Alliance(commands.Cog):
             return
         alliance_name, current_kid = row
         await interaction.response.send_modal(
-            EditKingdomModal(alliance_id, alliance_name, current_kid, self.conn)
+            EditKingdomModal(alliance_id, alliance_name, current_kid, self.conn, self.bot)
         )
 
     async def show_edit_alliance_for(self, interaction: discord.Interaction, alliance_id: int):
@@ -1751,11 +1765,12 @@ class EditKingdomModal(discord.ui.Modal):
     kingdom so non-matching players are rejected at add-time."""
 
     def __init__(self, alliance_id: int, alliance_name: str,
-                 current_kid, conn):
+                 current_kid, conn, bot):
         super().__init__(title="Set Alliance Kingdom")
         self.alliance_id = alliance_id
         self.alliance_name = alliance_name
         self.conn = conn
+        self.bot = bot
         self.kid_input = discord.ui.TextInput(
             label="Kingdom # (blank = no lock)",
             placeholder="Leave blank to clear the kingdom restriction",
@@ -1787,24 +1802,6 @@ class EditKingdomModal(discord.ui.Modal):
                 (new_kid, self.alliance_id),
             )
             self.conn.commit()
-
-            if new_kid is None:
-                desc = (
-                    f"{theme.allianceIcon} **{self.alliance_name}**\n"
-                    f"Kingdom lock **cleared** — players from any kingdom can now be added."
-                )
-            else:
-                desc = (
-                    f"{theme.allianceIcon} **{self.alliance_name}**\n"
-                    f"Locked to **Kingdom #{new_kid}** — only players in this kingdom "
-                    f"can be added going forward."
-                )
-            embed = discord.Embed(
-                title=f"{theme.verifiedIcon} Kingdom Updated",
-                description=desc,
-                color=theme.emColor3,
-            )
-            await interaction.response.edit_message(embed=embed, view=None)
         except Exception as e:
             logger.error(f"Error setting kingdom on alliance {self.alliance_id}: {e}")
             print(f"Error setting kingdom on alliance {self.alliance_id}: {e}")
@@ -1814,6 +1811,26 @@ class EditKingdomModal(discord.ui.Modal):
                 )
             except Exception:
                 pass
+            return
+
+        if new_kid is None:
+            result = (
+                f"{theme.verifiedIcon} **{self.alliance_name}** kingdom lock cleared. "
+                f"Players from any kingdom can now be added."
+            )
+        else:
+            result = (
+                f"{theme.verifiedIcon} **{self.alliance_name}** locked to Kingdom #{new_kid}. "
+                f"Only players in this kingdom can be added going forward."
+            )
+
+        # Return to the hub and report the result.
+        main_menu = self.bot.get_cog("MainMenu")
+        if main_menu:
+            await main_menu.show_alliance_hub(interaction, self.alliance_id)
+            await interaction.followup.send(result, ephemeral=True)
+        else:
+            await interaction.response.send_message(result, ephemeral=True)
 
 
 class PaginatedDeleteView(discord.ui.View):

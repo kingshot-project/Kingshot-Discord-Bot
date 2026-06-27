@@ -17,7 +17,7 @@ from .login_handler import LoginHandler
 from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message, disable_expired_view
 from .process_queue import MEMBER_ADD, PreemptedException
-from .alliance import check_alliance_kingdom
+from .alliance import resolve_alliance_kid, kingdom_lock_reason, KINGDOM_CHECK_UNAVAILABLE
 
 logger = logging.getLogger('alliance')
 
@@ -2506,6 +2506,9 @@ class AllianceMemberOperations(commands.Cog):
             # Cooperative preemption: yield to higher-priority work between members
             process_queue_cog = self.bot.get_cog('ProcessQueue')
 
+            # Resolve the alliance's kingdom lock once for the whole batch.
+            kid_ok, locked_kid = resolve_alliance_kid(alliance_id)
+
             index = 0
             while index < len(fids_to_process):
                 # Check for higher-priority work
@@ -2570,17 +2573,15 @@ class AllianceMemberOperations(commands.Cog):
                         stove_lv_content = data.get('stove_lv_content', None)
                         kid = data.get('kid', None)
 
-                        kingdom_error = check_alliance_kingdom(alliance_id, kid)
+                        kingdom_error = (
+                            KINGDOM_CHECK_UNAVAILABLE if not kid_ok
+                            else kingdom_lock_reason(locked_kid, kid)
+                        )
                         if kingdom_error:
                             with open(log_file_path, 'a', encoding='utf-8') as log_file:
-                                log_file.write(f"REJECTED: ID {fid} — {kingdom_error}\n")
+                                log_file.write(f"REJECTED: ID {fid} - {kingdom_error}\n")
                             error_count += 1
-                            # Surface the nickname alongside the fid in the failure
-                            # field — for kingdom rejections we always have it from
-                            # the API; fall back to bare fid if it's somehow missing.
-                            display = f"{nickname} ({fid})" if nickname else str(fid)
-                            if display not in error_users and fid not in error_users:
-                                error_users.append(display)
+                            error_users.append(fid)
                             embed.set_field_at(
                                 1,
                                 name=f"{theme.deniedIcon} Failed ({error_count}/{total_users})",

@@ -18,6 +18,7 @@ from .permission_handler import PermissionManager
 from .pimp_my_bot import theme, safe_edit_message, disable_expired_view
 from .process_queue import MEMBER_ADD, PreemptedException
 from .alliance import resolve_alliance_kid, kingdom_lock_reason, KINGDOM_CHECK_UNAVAILABLE
+from . import alliance_power_changes
 
 logger = logging.getLogger('alliance')
 
@@ -3443,6 +3444,9 @@ class AlliancePowerRankingsView(discord.ui.View):
         end = start + self.PAGE_SIZE
         page = self.members[start:end]
 
+        fids = [m[0] for m in self.members]
+        pdeltas = alliance_power_changes.latest_deltas(fids, "power")
+
         lines = [
             f"**Name** (`ID`) — **Power** — `CP` **Combat Power** · "
             f"times shown are last-updated.",
@@ -3457,8 +3461,9 @@ class AlliancePowerRankingsView(discord.ui.View):
                 if power is None:
                     lines.append(_ltr_line(f"{head} — *no power data yet*"))
                 else:
+                    badge = f"  {alliance_power_changes.format_delta(pdeltas[fid]['pct'])}" if fid in pdeltas else ""
                     lines.append(_ltr_line(
-                        f"{head} — {self._format_power(power)}{self._relative(power_at)}"))
+                        f"{head} — {self._format_power(power)}{self._relative(power_at)}{badge}"))
                     if cp is not None:
                         lines.append(_ltr_line(
                             f"      `CP` {self._format_power(cp)}{self._relative(cp_at)}"))

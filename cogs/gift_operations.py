@@ -100,7 +100,7 @@ class GiftOperations(commands.Cog):
         except sqlite3.OperationalError:
             pass
 
-        # WOS API URLs and Key
+        # Kingshot API URLs and Key
         self.wos_player_info_url = "https://kingshot-giftcode.centurygame.com/api/player"
         self.wos_giftcode_url = "https://kingshot-giftcode.centurygame.com/api/gift_code"
         self.wos_giftcode_redemption_url = "https://kingshot-giftcode.centurygame.com"
@@ -305,6 +305,8 @@ class GiftOperations(commands.Cog):
                 f"└ View all active, valid codes\n\n"
                 f"{theme.targetIcon} **Redeem Gift Code**\n"
                 f"└ Redeem gift code(s) for one or more alliances\n\n"
+                f"{theme.archiveIcon} **Redemption History**\n"
+                f"└ See which accounts redeemed, already had, or failed a code\n\n"
                 f"{theme.settingsIcon} **Settings**\n"
                 f"└ Set up a gift code channel, configure auto redemption, and more...\n\n"
                 f"{theme.deniedIcon} **Delete Gift Code**\n"
@@ -318,8 +320,8 @@ class GiftOperations(commands.Cog):
 
     # ── Delegation to gift_redemption ─────────────────────────────────
 
-    async def validate_gift_code_immediately(self, giftcode, source="unknown"):
-        return await gift_redemption.validate_gift_code_immediately(self, giftcode, source)
+    async def validate_gift_code_immediately(self, giftcode, source="unknown", force=False):
+        return await gift_redemption.validate_gift_code_immediately(self, giftcode, source, force)
 
     def encode_data(self, data):
         return gift_redemption.encode_data(self, data)
@@ -399,8 +401,14 @@ class GiftOperations(commands.Cog):
     async def verify_test_fid(self, fid):
         return await gift_settings.verify_test_fid(self, fid)
 
+    async def update_test_fid(self, new_fid):
+        return await gift_settings.update_test_fid(self, new_fid)
+
     def get_test_fid(self):
         return gift_settings.get_test_fid(self)
+
+    def clear_test_fid(self):
+        return gift_settings.clear_test_fid(self)
 
     async def get_validation_fid(self):
         return await gift_settings.get_validation_fid(self)
@@ -408,8 +416,15 @@ class GiftOperations(commands.Cog):
     async def show_redemption_priority(self, interaction):
         return await gift_settings.show_redemption_priority(self, interaction)
 
+    async def show_redemption_summary(self, interaction):
+        return await gift_settings.show_redemption_summary(self, interaction)
+
     async def setup_giftcode_auto(self, interaction):
         return await gift_settings.setup_giftcode_auto(self, interaction)
+
+    async def show_redeem_results(self, interaction):
+        from .gift_redemption_results import show_redeem_results as _show
+        return await _show(self, interaction)
 
     # ── Delegation to gift_views ──────────────────────────────────────
 

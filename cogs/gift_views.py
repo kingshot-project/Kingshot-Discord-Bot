@@ -185,7 +185,7 @@ async def delete_gift_code(cog, interaction: discord.Interaction):
             elif validation_status == 'invalid':
                 status_display = f"{theme.deniedIcon} Invalid"
             elif validation_status == 'pending':
-                status_display = f"{theme.warnIcon} Pending"
+                status_display = f"{theme.warnIcon} Validating"
             else:
                 status_display = f"{theme.infoIcon} Unknown"
 
@@ -372,7 +372,13 @@ async def show_settings_menu(cog, interaction: discord.Interaction):
             f"{theme.chartIcon} **Redemption Priority**\n"
             f"└ Change the order in which alliances auto-redeem new gift codes\n\n"
             f"{theme.searchIcon} **Channel History Scan**\n"
-            f"└ Scan for gift codes in existing messages in a gift channel\n"
+            f"└ Scan for gift codes in existing messages in a gift channel\n\n"
+            f"{theme.redeemIcon} **Redemption Summary**\n"
+            f"└ Per-alliance: post a results summary in the channel after redemptions\n\n"
+            f"{theme.fidIcon} **Set Test ID**\n"
+            f"└ Player ID used to validate codes (blank = rotate alliance members)\n\n"
+            f"{theme.trashIcon} **Clear Redemption Cache**\n"
+            f"└ Wipe redemption records so codes can be re-redeemed\n"
             f"{theme.lowerDivider}"
         ),
         color=theme.emColor1
@@ -406,15 +412,19 @@ class CreateGiftCodeModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         logger = self.cog.logger
-        await interaction.response.defer(ephemeral=True)
+        # thinking=True makes this a NEW ephemeral message; without it a modal submit
+        # just edits the menu the modal was opened from (ephemeral flag is ignored).
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         code = self.cog.clean_gift_code(self.giftcode.value)
         logger.info(f"[CreateGiftCodeModal] Code entered: {code}")
         final_embed = discord.Embed(title=f"{theme.giftIcon} Gift Code Creation Result")
 
-        # Check if code already exists
-        self.cog.cursor.execute("SELECT 1 FROM gift_codes WHERE giftcode = ?", (code,))
-        if self.cog.cursor.fetchone():
+        # A code we hold as 'invalid' that an admin re-adds is a reactivation candidate:
+        # re-validate it rather than bailing. Other stored statuses stay "already exists".
+        self.cog.cursor.execute("SELECT validation_status FROM gift_codes WHERE giftcode = ?", (code,))
+        row = self.cog.cursor.fetchone()
+        if row and row[0] != 'invalid':
             logger.info(f"[CreateGiftCodeModal] Code {code} already exists in DB.")
             final_embed.title = f"{theme.infoIcon} Gift Code Exists"
             final_embed.description = (
@@ -424,7 +434,8 @@ class CreateGiftCodeModal(discord.ui.Modal):
                 f"{theme.lowerDivider}\n"
             )
             final_embed.color = theme.emColor1
-        else: # Validate the code immediately
+        else: # Validate the code immediately (force a live re-probe for a reactivation candidate)
+            was_invalid = row is not None and row[0] == 'invalid'
             logger.info(f"[CreateGiftCodeModal] Validating code {code} before adding to DB.")
 
             validation_embed = discord.Embed(
@@ -434,7 +445,7 @@ class CreateGiftCodeModal(discord.ui.Modal):
             )
             await interaction.edit_original_response(embed=validation_embed)
 
-            is_valid, validation_msg = await self.cog.validate_gift_code_immediately(code, "button")
+            is_valid, validation_msg = await self.cog.validate_gift_code_immediately(code, "button", force=was_invalid)
 
             if is_valid: # Valid code - send to API and add to DB
                 logger.info(f"[CreateGiftCodeModal] Code '{code}' validated successfully.")
@@ -442,18 +453,33 @@ class CreateGiftCodeModal(discord.ui.Modal):
                 if hasattr(self.cog, 'api') and self.cog.api:
                     asyncio.create_task(self.cog.api.add_giftcode(code))
 
+                if was_invalid:
+                    # Genuine reactivation: clear old redemptions so members can claim again.
+                    try:
+                        self.cog.cursor.execute("DELETE FROM user_giftcodes WHERE giftcode = ?", (code,))
+                        self.cog.conn.commit()
+                        logger.info(f"[CreateGiftCodeModal] 🔄 REACTIVATION: '{code}' re-validated valid; cleared old redemption records")
+                    except Exception as e:
+                        logger.error(f"[CreateGiftCodeModal] Error clearing reactivation history for '{code}': {e}")
+
                 await self.cog._process_auto_use(code)
 
                 self.cog.cursor.execute("SELECT COUNT(*) FROM giftcodecontrol WHERE status = 1")
                 auto_count = self.cog.cursor.fetchone()[0]
 
-                final_embed.title = f"{theme.verifiedIcon} Gift Code Validated"
+                if auto_count:
+                    auto_redeem_line = f"{theme.refreshIcon} **Auto-redemption:** Queued for {auto_count} Alliances"
+                else:
+                    auto_redeem_line = f"{theme.refreshIcon} **Auto-redemption** is not enabled"
+
+                action_line = "Reactivated - re-validated and sent to API" if was_invalid else "Added to database and sent to API"
+                final_embed.title = f"{theme.verifiedIcon} Gift Code {'Reactivated' if was_invalid else 'Validated'}"
                 final_embed.description = (
                     f"**Gift Code Details**\n{theme.upperDivider}\n"
                     f"{theme.giftIcon} **Gift Code:** `{code}`\n"
                     f"{theme.verifiedIcon} **Status:** {validation_msg}\n"
-                    f"{theme.editListIcon} **Action:** Added to database and sent to API\n"
-                    f"{theme.refreshIcon} **Auto-redemption:** {'Queued for ' + str(auto_count) + ' alliance(s)' if auto_count else 'Disabled'}\n"
+                    f"{theme.editListIcon} **Action:** {action_line}\n"
+                    f"{auto_redeem_line}\n"
                     f"{theme.lowerDivider}\n"
                 )
                 final_embed.color = theme.emColor3
@@ -482,12 +508,17 @@ class CreateGiftCodeModal(discord.ui.Modal):
                     )
                     self.cog.conn.commit()
 
-                    final_embed.title = f"{theme.warnIcon} Gift Code Added (Pending)"
+                    # Re-check ASAP instead of waiting for the periodic loop.
+                    self.cog.schedule_revalidation(code, "button")
+
+                    from . import gift_redemption
+                    final_embed.title = f"{theme.warnIcon} Gift Code Added (Validating)"
                     final_embed.description = (
                         f"**Gift Code Details**\n{theme.upperDivider}\n"
                         f"{theme.giftIcon} **Gift Code:** `{code}`\n"
                         f"{theme.warnIcon} **Status:** {validation_msg}\n"
-                        f"{theme.editListIcon} **Action:** Added for later validation\n"
+                        f"{theme.editListIcon} **Action:** Saved - re-checking automatically\n"
+                        f"{gift_redemption.PENDING_REVALIDATION_NOTICE}\n"
                         f"{theme.lowerDivider}\n"
                     )
                     final_embed.color = theme.emColor4
@@ -845,6 +876,18 @@ class GiftView(discord.ui.View):
         await self.cog.show_settings_menu(interaction)
 
     @discord.ui.button(
+        label="Redemption History",
+        style=discord.ButtonStyle.secondary,
+        custom_id="redeem_history",
+        emoji=f"{theme.archiveIcon}",
+        row=1
+    )
+    async def redeem_history_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        await self.cog.show_redeem_results(interaction)
+
+    @discord.ui.button(
         label="Delete Gift Code",
         emoji=f"{theme.trashIcon}",
         style=discord.ButtonStyle.danger,
@@ -893,7 +936,7 @@ class SettingsMenuView(discord.ui.View):
         if not is_global:
             for child in self.children:
                 if isinstance(child, discord.ui.Button) and child.label in [
-                    "Redemption Priority"
+                    "Redemption Priority", "Set Test ID", "Clear Redemption Cache"
                 ]:
                     child.disabled = True
 
@@ -946,11 +989,59 @@ class SettingsMenuView(discord.ui.View):
         await self.cog.channel_history_scan(interaction)
 
     @discord.ui.button(
+        label="Redemption Summary",
+        style=discord.ButtonStyle.secondary,
+        custom_id="redemption_summary",
+        emoji=f"{theme.redeemIcon}",
+        row=1
+    )
+    async def redemption_summary_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        await self.cog.show_redemption_summary(interaction)
+
+    @discord.ui.button(
+        label="Set Test ID",
+        style=discord.ButtonStyle.secondary,
+        custom_id="set_test_fid",
+        emoji=f"{theme.fidIcon}",
+        row=1
+    )
+    async def set_test_fid_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        from .gift_settings import TestIDModal
+        await interaction.response.send_modal(TestIDModal(self.cog))
+
+    @discord.ui.button(
+        label="Clear Redemption Cache",
+        style=discord.ButtonStyle.danger,
+        custom_id="clear_redemption_cache",
+        emoji=f"{theme.trashIcon}",
+        row=2
+    )
+    async def clear_redemption_cache_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        from .gift_settings import ClearCacheConfirmView
+        embed = discord.Embed(
+            title=f"{theme.warnIcon} Clear Redemption Cache",
+            description=(
+                f"{theme.upperDivider}\n"
+                f"This permanently deletes **all** gift code redemption records, letting users redeem every code again.\n\n"
+                f"{theme.warnIcon} This cannot be undone.\n"
+                f"{theme.lowerDivider}"
+            ),
+            color=theme.emColor2
+        )
+        await interaction.response.send_message(embed=embed, view=ClearCacheConfirmView(self.cog), ephemeral=True)
+
+    @discord.ui.button(
         label="Back",
         style=discord.ButtonStyle.secondary,
         custom_id="back_to_main",
         emoji=f"{theme.backIcon}",
-        row=2
+        row=3
     )
     async def back_to_main_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_interaction_user(interaction, self.original_user_id):

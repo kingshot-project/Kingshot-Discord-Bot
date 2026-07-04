@@ -6,8 +6,9 @@ import logging
 import requests
 import json
 
-from .pimp_my_bot import theme, safe_edit_message
+from .pimp_my_bot import theme, safe_edit_message, check_interaction_user, notify_view_expired
 from .alliance_member_operations import AllianceSelectView
+from .permission_handler import PermissionManager
 
 logger = logging.getLogger('gift')
 
@@ -85,6 +86,46 @@ def get_test_fid(cog):
     except Exception as e:
         cog.logger.exception(f"Error getting test ID: {e}")
         return "43180889"
+
+
+async def update_test_fid(cog, new_fid):
+    """
+    Update the test ID in the database.
+
+    Args:
+        new_fid (str): The new test ID
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        cog.logger.info(f"Updating test ID to: {new_fid}")
+
+        cog.settings_cursor.execute("""
+            INSERT INTO test_fid_settings (test_fid) VALUES (?)
+        """, (new_fid,))
+        cog.settings_conn.commit()
+
+        cog.logger.info(f"Test ID updated successfully to {new_fid}")
+        return True
+
+    except sqlite3.Error as db_err:
+        cog.logger.exception(f"Database error updating test ID: {db_err}")
+        return False
+    except Exception as e:
+        cog.logger.exception(f"Unexpected error updating test ID: {e}")
+        return False
+
+
+def clear_test_fid(cog):
+    """Remove any configured test FID so validation rotates through random alliance members."""
+    try:
+        cog.settings_cursor.execute("DELETE FROM test_fid_settings")
+        cog.settings_conn.commit()
+        return True
+    except Exception as e:
+        cog.logger.exception(f"Error clearing test ID: {e}")
+        return False
 
 
 async def get_validation_fid(cog):
@@ -675,3 +716,180 @@ class ClearCacheConfirmView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+
+
+class TestIDModal(discord.ui.Modal, title="Set Test ID"):
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+        try:
+            self.cog.settings_cursor.execute("SELECT test_fid FROM test_fid_settings ORDER BY id DESC LIMIT 1")
+            result = self.cog.settings_cursor.fetchone()
+            current_fid = result[0] if result and result[0] != "43180889" else ""
+        except Exception:
+            current_fid = ""
+
+        self.test_fid = discord.ui.TextInput(
+            label="Player ID (blank = rotate members)",
+            placeholder="Leave blank to validate with random alliance members",
+            default=current_fid,
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.test_fid)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            raw = self.test_fid.value.strip()
+            if not raw:
+                self.cog.clear_test_fid()
+                self.cog.logger.info(f"Test FID cleared by {interaction.user.id}; validation will rotate alliance members.")
+            elif not raw.isdigit():
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} Invalid ID. Enter a numeric player ID, or leave it blank to rotate alliance members.",
+                    ephemeral=True)
+                return
+            else:
+                await self.cog.update_test_fid(raw)
+                self.cog.logger.info(f"Test FID set to {raw} by {interaction.user.id}.")
+
+            # Refresh the settings menu in place so it shows the new mode.
+            await self.cog.show_settings_menu(interaction)
+        except Exception as e:
+            self.cog.logger.exception(f"Error setting test ID: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"{theme.deniedIcon} An error occurred: {str(e)}", ephemeral=True)
+
+
+async def show_redemption_summary(cog, interaction: discord.Interaction):
+    """Per-alliance config for the post-redemption summary embed."""
+    alliances, _ = PermissionManager.get_admin_alliances(
+        interaction.user.id, interaction.guild_id or 0
+    )
+    if not alliances:
+        msg = f"{theme.deniedIcon} You have no alliances to configure."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
+    view = RedemptionSummaryView(cog, interaction.user.id, alliances)
+    await safe_edit_message(interaction, embed=view.build_embed(), view=view, content=None)
+    view.message = await interaction.original_response()
+
+
+class RedemptionSummaryView(discord.ui.View):
+    """Pick an alliance, then toggle whether/what its redemption summary posts."""
+
+    def __init__(self, cog, user_id: int, alliances):
+        super().__init__(timeout=7200)
+        self.cog = cog
+        self.user_id = user_id
+        self.alliances = alliances            # [(alliance_id, name), ...]
+        self.selected_id = None
+        self.message = None
+        self._build_components()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await check_interaction_user(interaction, self.user_id)
+
+    def _settings(self):
+        from .gift_redemption import get_summary_settings
+        return get_summary_settings(self.cog, self.selected_id) if self.selected_id else None
+
+    def _build_components(self):
+        self.clear_items()
+        options = [
+            discord.SelectOption(
+                label=name[:100], value=str(aid),
+                default=str(aid) == str(self.selected_id),
+            )
+            for aid, name in self.alliances[:25]
+        ]
+        select = discord.ui.Select(placeholder="Select an alliance", options=options, row=0)
+        select.callback = self._on_alliance
+        self.add_item(select)
+
+        s = self._settings()
+        if s is not None:
+            self._add_toggle("Summary", theme.redeemIcon, bool(s["enabled"]), self._toggle_enabled, row=1)
+            if s["enabled"]:
+                self._add_toggle("Successful", theme.verifiedIcon, bool(s["success"]), self._toggle_success, row=2)
+                self._add_toggle("Already Redeemed", theme.giftIcon, bool(s["already"]), self._toggle_already, row=2)
+                self._add_toggle("Failed", theme.deniedIcon, bool(s["failed"]), self._toggle_failed, row=2)
+
+        back = discord.ui.Button(label="Back", emoji=f"{theme.backIcon}", style=discord.ButtonStyle.secondary, row=3)
+        back.callback = self._back
+        self.add_item(back)
+
+    def _add_toggle(self, label, emoji, enabled, callback, row):
+        btn = discord.ui.Button(
+            label=f"{label}: {'On' if enabled else 'Off'}",
+            emoji=f"{emoji}",
+            style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary,
+            row=row,
+        )
+        btn.callback = callback
+        self.add_item(btn)
+
+    def build_embed(self) -> discord.Embed:
+        desc = (
+            "Choose an alliance, then turn its post-redemption summary on or off "
+            "and pick which results it lists.\n\n"
+            "When on, the bot posts one embed in the gift channel after each code "
+            "finishes for that alliance, listing the buckets you enable.\n"
+        )
+        s = self._settings()
+        if s is not None:
+            name = next((n for a, n in self.alliances if str(a) == str(self.selected_id)), self.selected_id)
+            if not s["enabled"]:
+                state = f"{theme.deniedIcon} Off"
+            else:
+                picked = [lbl for lbl, on in (
+                    ("Successful", s["success"]), ("Already Redeemed", s["already"]), ("Failed", s["failed"])
+                ) if on]
+                state = f"{theme.verifiedIcon} On — " + (", ".join(picked) if picked else "no buckets selected yet")
+            desc += f"\n{theme.upperDivider}\n**{name}:** {state}\n{theme.lowerDivider}"
+        return discord.Embed(
+            title=f"{theme.redeemIcon} Redemption Summary",
+            description=desc,
+            color=theme.emColor1,
+        )
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self._build_components()
+        await safe_edit_message(interaction, embed=self.build_embed(), view=self, content=None)
+
+    async def _on_alliance(self, interaction: discord.Interaction):
+        self.selected_id = int(interaction.data["values"][0])
+        await self._refresh(interaction)
+
+    async def _set(self, interaction, **kwargs):
+        from .gift_redemption import set_summary_settings
+        set_summary_settings(self.cog, self.selected_id, **kwargs)
+        await self._refresh(interaction)
+
+    async def _toggle_enabled(self, interaction):
+        s = self._settings()
+        turning_on = not s["enabled"]
+        kwargs = {"enabled": turning_on}
+        # Sensible default on first enable: show Failed (the actionable bucket).
+        if turning_on and not (s["success"] or s["already"] or s["failed"]):
+            kwargs["failed"] = True
+        await self._set(interaction, **kwargs)
+
+    async def _toggle_success(self, interaction):
+        await self._set(interaction, success=not self._settings()["success"])
+
+    async def _toggle_already(self, interaction):
+        await self._set(interaction, already=not self._settings()["already"])
+
+    async def _toggle_failed(self, interaction):
+        await self._set(interaction, failed=not self._settings()["failed"])
+
+    async def _back(self, interaction: discord.Interaction):
+        await self.cog.show_settings_menu(interaction)
+
+    async def on_timeout(self):
+        await notify_view_expired(self, "redemption summary settings")

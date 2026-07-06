@@ -11,7 +11,7 @@ import csv
 import io
 from io import BytesIO
 import os
-from .attendance import SessionSelectView
+from .attendance import SessionSelectView, event_type_display
 from .pimp_my_bot import theme
 
 logger = logging.getLogger('bot')
@@ -312,7 +312,7 @@ class AttendanceReport(commands.Cog):
         # Write metadata
         writer.writerow(['Session Name:', session_info['session_name']])
         writer.writerow(['Alliance:', session_info['alliance_name']])
-        writer.writerow(['Event Type:', session_info.get('event_type', 'Other')])
+        writer.writerow(['Event Type:', event_type_display(session_info.get('event_type') or 'Other')[0]])
         if session_info.get('event_date'):
             writer.writerow(['Event Date:', session_info['event_date'].split('T')[0] if isinstance(session_info['event_date'], str) else session_info['event_date']])
         writer.writerow(['Export Date:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
@@ -346,7 +346,7 @@ class AttendanceReport(commands.Cog):
         # Write metadata
         writer.writerow(['Session Name:', session_info['session_name']])
         writer.writerow(['Alliance:', session_info['alliance_name']])
-        writer.writerow(['Event Type:', session_info.get('event_type', 'Other')])
+        writer.writerow(['Event Type:', event_type_display(session_info.get('event_type') or 'Other')[0]])
         if session_info.get('event_date'):
             writer.writerow(['Event Date:', session_info['event_date'].split('T')[0] if isinstance(session_info['event_date'], str) else session_info['event_date']])
         writer.writerow(['Export Date:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
@@ -440,7 +440,7 @@ class AttendanceReport(commands.Cog):
     
     <div class="stats">
         <h3>Summary</h3>
-        <p><strong>Event Type:</strong> {session_info.get('event_type', 'Other')}</p>
+        <p><strong>Event Type:</strong> {event_type_display(session_info.get('event_type') or 'Other')[0]}</p>
         {'<p><strong>Event Date:</strong> ' + (session_info['event_date'].split('T')[0] if isinstance(session_info.get('event_date'), str) else str(session_info.get('event_date', ''))) + '</p>' if session_info.get('event_date') else ''}
         <p><strong>Export Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         <p><strong>Total Players:</strong> {session_info['total_players']}</p>
@@ -585,7 +585,7 @@ class AttendanceReport(commands.Cog):
                     f"**Format:** {format_name}\n"
                     f"**Alliance:** {session_info['alliance_name']}\n"
                     f"**Session:** {session_info['session_name']}\n"
-                    f"**Event Type:** {session_info.get('event_type', 'Other')}\n"
+                    f"**Event Type:** {event_type_display(session_info.get('event_type') or 'Other')[0]}\n"
                     f"**Total Records:** {session_info['total_players']}",
                     file=file
                 )
@@ -844,7 +844,7 @@ class AttendanceReport(commands.Cog):
                 # Format title with event type and date
                 title_text = f'Attendance Report - {alliance_name} | {session_name}'
                 if event_type:
-                    title_text += f' [{event_type}]'
+                    title_text += f' [{event_type_display(event_type)[0]}]'
                 if event_date:
                     if isinstance(event_date, str):
                         date_str = event_date.split('T')[0] if 'T' in event_date else event_date.split()[0]
@@ -893,7 +893,7 @@ class AttendanceReport(commands.Cog):
             embed_title = f"{theme.chartIcon} Attendance Report - {alliance_name}"
             description_text = f"**Session:** {session_name}"
             if event_type:
-                description_text += f" [{event_type}]"
+                description_text += f" [{event_type_display(event_type)[0]}]"
             description_text += f"\n**Total Marked:** {len(records)} players"
             
             embed = discord.Embed(
@@ -1196,7 +1196,7 @@ class AttendanceReport(commands.Cog):
             report_sections.append(f"{theme.chartIcon} **SUMMARY**")
             session_line = f"**Session:** {session_name}"
             if event_type:
-                session_line += f" [{event_type}]"
+                session_line += f" [{event_type_display(event_type)[0]}]"
             report_sections.append(session_line)
             report_sections.append(f"**Alliance:** {alliance_name}")
             date_str = "N/A"
@@ -1214,8 +1214,6 @@ class AttendanceReport(commands.Cog):
             report_sections.append(f"**Date:** {date_str}")
             report_sections.append(f"**Total Marked:** {len(records)} players")
             report_sections.append(f"**Present:** {present_count} | **Absent:** {absent_count}")
-            if session_id:
-                report_sections.append(f"**Session ID:** {session_id}")
             report_sections.append("")
             
             # Player details section
@@ -1319,10 +1317,7 @@ class AttendanceReport(commands.Cog):
 
                 # Add footer only to last embed
                 if idx == len(embeds) - 1:
-                    if session_id:
-                        embed.set_footer(text=f"Session ID: {session_id} | {sort_footer}")
-                    else:
-                        embed.set_footer(text=sort_footer)
+                    embed.set_footer(text=sort_footer)
 
                 discord_embeds.append(embed)
 

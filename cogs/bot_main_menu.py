@@ -891,7 +891,6 @@ class AllianceHubView(discord.ui.View):
         await _route_to_cog(
             interaction, self.cog.bot, "Alliance",
             "show_edit_kingdom_for", self.alliance_id,
-            fallback_method="show_alliance_operations",
             missing_label="Alliance",
         )
 

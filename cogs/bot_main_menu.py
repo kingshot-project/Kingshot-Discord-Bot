@@ -226,7 +226,7 @@ class MainMenu(commands.Cog):
                 f"{theme.exportIcon} **Export Members**\n"
                 f"└ Export one alliance or all of them to CSV/TSV\n\n"
                 f"{theme.refreshIcon} **Sync All**\n"
-                f"└ Refresh all alliance data from the game API\n\n"
+                f"└ Unavailable - member data can no longer be refreshed automatically\n\n"
                 f"{theme.editListIcon} **Self-Registration**\n"
                 f"└ Manage the global Self-Registration system\n"
                 f"{theme.lowerDivider}"
@@ -256,7 +256,8 @@ class MainMenu(commands.Cog):
             with sqlite3.connect('db/alliance.sqlite') as db:
                 cursor = db.cursor()
                 cursor.execute(
-                    "SELECT name, kid FROM alliance_list WHERE alliance_id = ?",
+                    "SELECT name, kid, COALESCE(state_locked, 0), COALESCE(multistate, 0) "
+                    "FROM alliance_list WHERE alliance_id = ?",
                     (alliance_id,),
                 )
                 row = cursor.fetchone()
@@ -266,7 +267,7 @@ class MainMenu(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            alliance_name, alliance_kid = row[0], row[1]
+            alliance_name, alliance_kid, state_locked, multistate = row
 
             with sqlite3.connect('db/users.sqlite') as db:
                 cursor = db.cursor()
@@ -288,15 +289,14 @@ class MainMenu(commands.Cog):
             else:
                 stats_line = "_No members yet — use **Add Members** to get started_"
 
-            if alliance_kid is None:
-                kingdom_line = (
-                    f"{theme.globeIcon} **Kingdom:** _not locked_ "
-                    f"(players from any kingdom can be added)"
-                )
+            if multistate:
+                kingdom_line = f"{theme.globeIcon} **Kingdom:** _multistate_ (members from many kingdoms)"
+            elif state_locked and alliance_kid is not None:
+                kingdom_line = f"{theme.globeIcon} **Kingdom:** locked to `#{alliance_kid}`"
+            elif alliance_kid is not None:
+                kingdom_line = f"{theme.globeIcon} **Kingdom:** `#{alliance_kid}` (home kingdom, not locked)"
             else:
-                kingdom_line = (
-                    f"{theme.globeIcon} **Kingdom:** locked to `#{alliance_kid}`"
-                )
+                kingdom_line = f"{theme.globeIcon} **Kingdom:** _not set_"
 
             tier = PermissionManager.get_tier(interaction.user.id)
             accessible, _ = PermissionManager.get_admin_alliances(
@@ -766,6 +766,20 @@ class AllianceManagementEntryView(discord.ui.View):
             interaction, self.cog.bot, "AllianceMemberOperations",
             "show_export_members",
             missing_label="Member Management",
+        )
+
+    @discord.ui.button(
+        label="Member Kingdoms",
+        emoji=theme.globeIcon,
+        style=discord.ButtonStyle.primary,
+        custom_id="alliance_entry_member_states",
+        row=3,
+    )
+    async def member_states(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _route_to_cog(
+            interaction, self.cog.bot, "GiftOperations",
+            "show_state_management",
+            missing_label="Gift Codes",
         )
 
     @discord.ui.button(

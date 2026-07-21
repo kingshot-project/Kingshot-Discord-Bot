@@ -1,6 +1,7 @@
 """Gift code settings — test FID management, redemption priority, and auto-redemption setup."""
 
 import discord
+import asyncio
 import sqlite3
 import logging
 import requests
@@ -88,25 +89,13 @@ def get_test_fid(cog):
         return "43180889"
 
 
-async def update_test_fid(cog, new_fid):
-    """
-    Update the test ID in the database.
-
-    Args:
-        new_fid (str): The new test ID
-
-    Returns:
-        bool: True if update was successful, False otherwise
-    """
+async def update_test_fid(cog, new_fid, kid=None):
+    """Set the test ID and its kingdom (needed for redemption/validation)."""
     try:
-        cog.logger.info(f"Updating test ID to: {new_fid}")
-
-        cog.settings_cursor.execute("""
-            INSERT INTO test_fid_settings (test_fid) VALUES (?)
-        """, (new_fid,))
+        cog.settings_cursor.execute(
+            "INSERT INTO test_fid_settings (test_fid, kid) VALUES (?, ?)", (new_fid, kid))
         cog.settings_conn.commit()
-
-        cog.logger.info(f"Test ID updated successfully to {new_fid}")
+        cog.logger.info(f"Test ID updated to {new_fid} (kingdom {kid})")
         return True
 
     except sqlite3.Error as db_err:
@@ -724,11 +713,12 @@ class TestIDModal(discord.ui.Modal, title="Set Test ID"):
         self.cog = cog
 
         try:
-            self.cog.settings_cursor.execute("SELECT test_fid FROM test_fid_settings ORDER BY id DESC LIMIT 1")
+            self.cog.settings_cursor.execute("SELECT test_fid, kid FROM test_fid_settings ORDER BY id DESC LIMIT 1")
             result = self.cog.settings_cursor.fetchone()
             current_fid = result[0] if result and result[0] != "43180889" else ""
+            current_kid = str(result[1]) if result and result[0] != "43180889" and result[1] is not None else ""
         except Exception:
-            current_fid = ""
+            current_fid = current_kid = ""
 
         self.test_fid = discord.ui.TextInput(
             label="Player ID (blank = rotate members)",
@@ -738,10 +728,19 @@ class TestIDModal(discord.ui.Modal, title="Set Test ID"):
             max_length=20
         )
         self.add_item(self.test_fid)
+        self.test_kid = discord.ui.TextInput(
+            label="Kingdom # (required when an ID is set)",
+            placeholder="The kingdom this player ID is in",
+            default=current_kid,
+            required=False,
+            max_length=10
+        )
+        self.add_item(self.test_kid)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             raw = self.test_fid.value.strip()
+            kid_raw = self.test_kid.value.strip()
             if not raw:
                 self.cog.clear_test_fid()
                 self.cog.logger.info(f"Test FID cleared by {interaction.user.id}; validation will rotate alliance members.")
@@ -750,9 +749,14 @@ class TestIDModal(discord.ui.Modal, title="Set Test ID"):
                     f"{theme.deniedIcon} Invalid ID. Enter a numeric player ID, or leave it blank to rotate alliance members.",
                     ephemeral=True)
                 return
+            elif not kid_raw.isdigit():
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} A test ID needs its Kingdom number so it can redeem. Enter the kingdom, or clear the ID to rotate members.",
+                    ephemeral=True)
+                return
             else:
-                await self.cog.update_test_fid(raw)
-                self.cog.logger.info(f"Test FID set to {raw} by {interaction.user.id}.")
+                await self.cog.update_test_fid(raw, int(kid_raw))
+                self.cog.logger.info(f"Test FID set to {raw} (kingdom {kid_raw}) by {interaction.user.id}.")
 
             # Refresh the settings menu in place so it shows the new mode.
             await self.cog.show_settings_menu(interaction)
@@ -893,3 +897,204 @@ class RedemptionSummaryView(discord.ui.View):
 
     async def on_timeout(self):
         await notify_view_expired(self, "redemption summary settings")
+
+
+# --- Member kingdom management (2026 gift API needs each member's kingdom on file) ---
+
+async def show_state_management(cog, interaction: discord.Interaction):
+    view = StateManagementView(cog, interaction.user.id)
+    await safe_edit_message(interaction, embed=await view.build_embed(), view=view, content=None)
+
+
+class StateManagementView(discord.ui.View):
+    def __init__(self, cog, user_id):
+        super().__init__(timeout=7200)
+        self.cog = cog
+        self.original_user_id = user_id
+        self.last_result = None
+
+    async def build_embed(self):
+        from . import gift_state_resolver as gsr
+        missing = await asyncio.to_thread(gsr.fids_missing_state)
+        survey = await asyncio.to_thread(gsr.survey_alliance_bindings)
+        multistate = [r for r in survey if r["multistate"]]
+        unbound = [r for r in survey if r["current_kid"] is None and not r["multistate"]]
+        bindable = [r for r in unbound if r["proposed_kid"] is not None]
+
+        lines = [
+            "Redemption now needs each member's kingdom on file. "
+            "Fix wrong or missing kingdoms here.\n",
+            f"{theme.upperDivider}",
+            f"{theme.membersIcon} **Members missing a kingdom:** `{len(missing)}`",
+            f"{theme.allianceIcon} **Unbound alliances:** `{len(unbound)}` "
+            f"({len(bindable)} can be auto-bound)",
+            f"{theme.allianceIcon} **Multistate alliances:** `{len(multistate)}` (never auto-bound)\n",
+            f"{theme.chartIcon} **Auto-bind Alliances**",
+            "└ Set each alliance's kingdom from its members' majority",
+            f"{theme.membersIcon} **Assign Kingdom to Missing**",
+            "└ Give members with no kingdom their alliance's kingdom (instant, no game calls)",
+            f"{theme.searchIcon} **Resolve Unknown (API)**",
+            f"└ Probe the game for the rest, one at a time (about {max(1, len(missing)) * 2}s total; no rewards sent)",
+            f"\n{theme.infoIcon} Can't auto-bind an alliance (too few known members)? "
+            f"Set its kingdom on the alliance itself (Alliance Management -> Set Kingdom), then Assign Kingdom to Missing.",
+        ]
+        if self.last_result:
+            lines.append(f"\n{theme.verifiedIcon} {self.last_result}")
+        lines.append(f"{theme.lowerDivider}")
+
+        return discord.Embed(
+            title=f"{theme.fidIcon} Member Kingdoms",
+            description="\n".join(lines),
+            color=theme.emColor1,
+        )
+
+    @discord.ui.button(label="Auto-bind Alliances", style=discord.ButtonStyle.primary,
+                       emoji=f"{theme.chartIcon}", row=0)
+    async def bind_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        result = await asyncio.to_thread(self.cog.bind_alliance_states)
+        b, m = len(result["bound"]), len(result["multistate"])
+        self.last_result = (
+            f"Bound {b} alliance(s) to a kingdom; flagged {m} as multistate."
+            if (b or m) else "No alliances had a clear majority to bind."
+        )
+        await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+
+    @discord.ui.button(label="Assign Kingdom to Missing", style=discord.ButtonStyle.primary,
+                       emoji=f"{theme.membersIcon}", row=0)
+    async def assign_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        n = await asyncio.to_thread(self.cog.assign_alliance_state_to_missing)
+        self.last_result = f"Assigned an alliance kingdom to {n} member(s) that had none."
+        await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+
+    @discord.ui.button(label="Resolve Unknown (API)", style=discord.ButtonStyle.secondary,
+                       emoji=f"{theme.searchIcon}", row=1)
+    async def resolve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        from . import gift_state_resolver as gsr
+        missing = await asyncio.to_thread(gsr.fids_missing_state)
+        if not missing:
+            self.last_result = "No members are missing a kingdom."
+            await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+            return
+        # Probing the game is slow (per-FID paced) - defer so the interaction doesn't expire.
+        await interaction.response.defer()
+        found = await self.cog.resolve_remaining_missing_states()
+        self.last_result = f"Resolved {len(found)} of {len(missing)} unknown kingdom(s) via the game."
+        await interaction.edit_original_response(embed=await self.build_embed(), view=self)
+
+    @discord.ui.button(label="Multistate Alliances", style=discord.ButtonStyle.secondary,
+                       emoji=f"{theme.allianceIcon}", row=1)
+    async def multistate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        view = MultistateView(self.cog, self.original_user_id)
+        await safe_edit_message(interaction, embed=await view.build_embed(), view=view, content=None)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary,
+                       emoji=f"{theme.backIcon}", row=2)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        main_menu = self.cog.bot.get_cog("MainMenu")
+        if main_menu:
+            await main_menu.show_alliance_management(interaction)
+
+    async def on_timeout(self):
+        await notify_view_expired(self, "member kingdoms menu")
+
+
+class MultistateView(discord.ui.View):
+    """Toggle which alliances are 'multistate' (members from many kingdoms - never auto-bound)."""
+    def __init__(self, cog, user_id, page=0):
+        super().__init__(timeout=7200)
+        self.cog = cog
+        self.original_user_id = user_id
+        self.page = page
+        self.rows = []
+
+    async def _load(self):
+        from . import gift_state_resolver as gsr
+        self.rows = await asyncio.to_thread(gsr.survey_alliance_bindings)
+        self.rows.sort(key=lambda r: (not r["multistate"], str(r["name"]).lower()))
+
+    async def build_embed(self):
+        await self._load()
+        self.clear_items()
+        pages = max(1, (len(self.rows) + 24) // 25)
+        self.page = max(0, min(self.page, pages - 1))
+        page_rows = self.rows[self.page * 25:(self.page + 1) * 25]
+
+        if page_rows:
+            options = []
+            for r in page_rows:
+                on = r["multistate"]
+                status = "Multistate" if on else (f"Kingdom {r['current_kid']}" if r["current_kid"] else "Unbound")
+                options.append(discord.SelectOption(
+                    label=str(r["name"])[:100], value=str(r["alliance_id"]),
+                    description=f"{status} - tap to turn multistate {'off' if on else 'on'}"[:100],
+                    emoji=theme.verifiedIcon if on else None,
+                ))
+            select = discord.ui.Select(placeholder="Toggle an alliance's multistate flag", options=options, row=0)
+            select.callback = self._on_select
+            self.add_item(select)
+
+        if pages > 1:
+            self._add_nav(pages)
+        back = discord.ui.Button(label="Back", emoji=f"{theme.backIcon}", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = self._on_back
+        self.add_item(back)
+
+        lines = [
+            "Mark alliances whose members span many kingdoms (public/mixed bots). "
+            "Multistate alliances are never auto-bound to one kingdom and their members "
+            "keep their own resolved kingdoms.\n",
+            f"{theme.upperDivider}",
+            f"{theme.allianceIcon} Currently multistate: "
+            f"`{sum(1 for r in self.rows if r['multistate'])}`",
+            f"{theme.lowerDivider}",
+        ]
+        return discord.Embed(title=f"{theme.allianceIcon} Multistate Alliances",
+                             description="\n".join(lines), color=theme.emColor1)
+
+    def _add_nav(self, pages):
+        prev = discord.ui.Button(label="Prev", style=discord.ButtonStyle.secondary, row=1, disabled=self.page == 0)
+        nxt = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, row=1, disabled=self.page >= pages - 1)
+        prev.callback = self._on_prev
+        nxt.callback = self._on_next
+        self.add_item(prev)
+        self.add_item(nxt)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        from . import gift_state_resolver as gsr
+        alliance_id = int(interaction.data["values"][0])
+        currently = await asyncio.to_thread(gsr.is_multistate, alliance_id)
+        await asyncio.to_thread(gsr.set_multistate, alliance_id, not currently)
+        await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+
+    async def _on_prev(self, interaction: discord.Interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        self.page -= 1
+        await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+
+    async def _on_next(self, interaction: discord.Interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        self.page += 1
+        await safe_edit_message(interaction, embed=await self.build_embed(), view=self, content=None)
+
+    async def _on_back(self, interaction: discord.Interaction):
+        if not await check_interaction_user(interaction, self.original_user_id):
+            return
+        view = StateManagementView(self.cog, self.original_user_id)
+        await safe_edit_message(interaction, embed=await view.build_embed(), view=view, content=None)
+
+    async def on_timeout(self):
+        await notify_view_expired(self, "multistate alliances menu")

@@ -1420,6 +1420,13 @@ if __name__ == "__main__":
             # Upgrade path: per-alliance kingdom lock. NULL = no restriction (legacy behaviour).
             if "kid" not in existing_cols:
                 conn_alliance.execute("ALTER TABLE alliance_list ADD COLUMN kid INTEGER")
+            # Upgrade path: multistate flag - members span many kingdoms, never auto-bind to one.
+            if "multistate" not in existing_cols:
+                conn_alliance.execute("ALTER TABLE alliance_list ADD COLUMN multistate INTEGER DEFAULT 0")
+            # Upgrade path: separate the deliberate kingdom-lock from the (auto-bindable) home kingdom.
+            if "state_locked" not in existing_cols:
+                conn_alliance.execute("ALTER TABLE alliance_list ADD COLUMN state_locked INTEGER DEFAULT 0")
+                conn_alliance.execute("UPDATE alliance_list SET state_locked = 1 WHERE kid IS NOT NULL")
 
     create_tables()
     startup.phase_ok("Database ready")
@@ -1486,21 +1493,13 @@ if __name__ == "__main__":
                         startup.api_status("Gift Code Distribution API", "error", "Offline")
 
                 try:
-                    proxy_detail = (
-                        f"via proxy {os.environ.get('HTTPS_PROXY')}"
-                        if os.environ.get("HTTPS_PROXY")
-                        else "no proxy"
-                    )
-                    sync_cog = bot.get_cog("AllianceSync")
-                    login_handler = getattr(sync_cog, 'login_handler', None)
-                    if login_handler:
-                        status = await login_handler.check_apis_availability()
-                        if status.get('api1_available'):
-                            startup.api_status("Gift Code Redemption API", "ok")
-                        else:
-                            startup.api_status("Gift Code Redemption API", "error", proxy_detail)
+                    health = bot.get_cog("BotHealth")
+                    if health is not None:
+                        result = await health.check_wos_api_status()
+                        ok = result.get("status") in ("healthy", "warning")
+                        startup.api_status("Gift Code Redemption API", "ok" if ok else "error", result.get("message"))
                     else:
-                        startup.api_status("Gift Code Redemption API", "error", "Check failed")
+                        startup.api_status("Gift Code Redemption API", "error", "Health cog not loaded")
                 except Exception:
                     startup.api_status("Gift Code Redemption API", "error", "Check failed")
 

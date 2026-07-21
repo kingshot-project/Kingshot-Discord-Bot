@@ -22,11 +22,14 @@ KINGDOM_CHECK_UNAVAILABLE = (
 
 
 def resolve_alliance_kid(alliance_id: int):
-    """Read the alliance's locked kid -> (ok, kid); ok=False means fail closed."""
+    """Read the alliance's LOCK kingdom -> (ok, locked_kid). `locked_kid` is None unless the
+    alliance is explicitly kingdom-locked, so `kid` alone (an auto-bound home kingdom) never
+    rejects adds - only a deliberate lock does. ok=False means fail closed (read error)."""
     try:
         with sqlite3.connect("db/alliance.sqlite", timeout=30.0) as conn:
             row = conn.execute(
-                "SELECT kid FROM alliance_list WHERE alliance_id = ?", (alliance_id,)
+                "SELECT kid, COALESCE(state_locked, 0) FROM alliance_list WHERE alliance_id = ?",
+                (alliance_id,),
             ).fetchone()
     except sqlite3.OperationalError as e:
         msg = str(e).lower()
@@ -35,7 +38,10 @@ def resolve_alliance_kid(alliance_id: int):
         logger.warning(f"Kingdom gate read failed for alliance {alliance_id}: {e}")
         print(f"Kingdom gate read failed for alliance {alliance_id}: {e}")
         return False, None
-    return True, (row[0] if row else None)
+    if not row:
+        return True, None
+    kid, locked = row
+    return True, (kid if locked else None)
 
 
 def kingdom_lock_reason(alliance_kid, player_kid) -> "str | None":
@@ -362,7 +368,15 @@ class Alliance(commands.Cog):
         await self.add_alliance(interaction)
 
     async def sync_all_alliances(self, interaction: discord.Interaction):
-        """Enqueue an alliance_sync_manual for every alliance the admin can access."""
+        """Alliance sync is disabled - there is no player-data API to refresh from."""
+        await interaction.response.send_message(
+            f"{theme.warnIcon} Alliance sync is no longer available - member nicknames, "
+            f"levels and kingdoms can't be refreshed automatically. Set member kingdoms under "
+            f"**Alliance Management -> Member Kingdoms**.",
+            ephemeral=True,
+        )
+        return
+
         try:
             allowed_alliance_ids, is_global = PermissionManager.get_admin_alliance_ids(
                 interaction.user.id, interaction.guild_id
@@ -521,11 +535,11 @@ class Alliance(commands.Cog):
         )
 
     async def show_edit_kingdom_for(self, interaction: discord.Interaction, alliance_id: int):
-        """Open the per-alliance Kingdom modal. Empty stores NULL (no lock)."""
+        """Open the per-alliance kingdom-lock modal. Empty clears the lock."""
         with sqlite3.connect('db/alliance.sqlite', timeout=30.0) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT name, kid FROM alliance_list WHERE alliance_id = ?",
+                "SELECT name, kid, COALESCE(state_locked, 0) FROM alliance_list WHERE alliance_id = ?",
                 (alliance_id,),
             )
             row = cursor.fetchone()
@@ -534,9 +548,10 @@ class Alliance(commands.Cog):
                 f"{theme.deniedIcon} Alliance not found.", ephemeral=True
             )
             return
-        alliance_name, current_kid = row
+        alliance_name, kid, locked = row
+        current_lock = kid if locked else None
         await interaction.response.send_modal(
-            EditKingdomModal(alliance_id, alliance_name, current_kid, self.conn, self.bot)
+            EditKingdomModal(alliance_id, alliance_name, current_lock, self.conn, self.bot)
         )
 
     async def show_edit_alliance_for(self, interaction: discord.Interaction, alliance_id: int):
@@ -1722,11 +1737,12 @@ class AddAllianceModal(discord.ui.Modal):
                     return
 
                 cursor.execute(
-                    "INSERT INTO alliance_list (name, discord_server_id, kid) "
-                    "VALUES (?, ?, ?)",
+                    "INSERT INTO alliance_list (name, discord_server_id, kid, state_locked) "
+                    "VALUES (?, ?, ?, ?)",
                     (alliance_name,
                      interaction.guild.id if interaction.guild else None,
-                     parsed_kid),
+                     parsed_kid,
+                     1 if parsed_kid is not None else 0),
                 )
                 alliance_id = cursor.lastrowid
                 cursor.execute(
@@ -1852,10 +1868,17 @@ class EditKingdomModal(discord.ui.Modal):
                 return
         try:
             cursor = self.conn.cursor()
-            cursor.execute(
-                "UPDATE alliance_list SET kid = ? WHERE alliance_id = ?",
-                (new_kid, self.alliance_id),
-            )
+            if new_kid is not None:
+                cursor.execute(
+                    "UPDATE alliance_list SET kid = ?, state_locked = 1, multistate = 0 WHERE alliance_id = ?",
+                    (new_kid, self.alliance_id),
+                )
+            else:
+                # Clear only the lock; keep kid as the alliance's home kingdom for redemption.
+                cursor.execute(
+                    "UPDATE alliance_list SET state_locked = 0 WHERE alliance_id = ?",
+                    (self.alliance_id,),
+                )
             self.conn.commit()
         except Exception as e:
             logger.error(f"Error setting kingdom on alliance {self.alliance_id}: {e}")

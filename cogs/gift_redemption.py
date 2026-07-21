@@ -19,6 +19,7 @@ from requests.adapters import HTTPAdapter
 from .pimp_my_bot import theme
 from .browser_headers import get_headers
 from .process_queue import GIFT_VALIDATE, GIFT_REDEEM, PreemptedException
+from . import gift_state_resolver
 
 
 async def enqueue_validation(cog, giftcode, source, message=None, channel=None):
@@ -569,13 +570,34 @@ INVALID_REDEEM_STATUSES = ("TIME_ERROR", "CDK_NOT_FOUND", "USAGE_LIMIT")
 CONCLUSIVE_REDEEM_STATUSES = VALID_REDEEM_STATUSES + INVALID_REDEEM_STATUSES
 
 
+async def get_user_kid(cog, fid):
+    """The player's stored kingdom (kid); falls back to the configured test FID's kingdom."""
+    def _query():
+        with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
+            row = conn.execute("SELECT kid FROM users WHERE fid = ?", (fid,)).fetchone()
+        if row and row[0] is not None:
+            return row[0]
+        with sqlite3.connect('db/settings.sqlite', timeout=30.0) as sconn:
+            trow = sconn.execute(
+                "SELECT kid FROM test_fid_settings WHERE test_fid = ? ORDER BY id DESC LIMIT 1",
+                (str(fid),)).fetchone()
+        return trow[0] if trow and trow[0] is not None else None
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as e:
+        cog.logger.warning(f"GiftOps: could not read kingdom for FID {fid}: {e}")
+        return None
+
+
 async def get_alt_validation_fids(cog, exclude, limit=3):
-    """Random alliance-member FIDs to validate with when the primary FID is inconclusive or dead."""
+    """Random alliance-member FIDs to validate with when the primary FID is dead.
+    Only members with a known kingdom (kid) — redemption needs it now."""
     def _query():
         with sqlite3.connect('db/users.sqlite', timeout=30.0) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT fid FROM users WHERE alliance IS NOT NULL AND alliance != '' ORDER BY RANDOM() LIMIT ?",
+                "SELECT fid FROM users WHERE alliance IS NOT NULL AND alliance != '' "
+                "AND kid IS NOT NULL ORDER BY RANDOM() LIMIT ?",
                 (limit + len(exclude),),
             )
             return [row[0] for row in cursor.fetchall()]
@@ -953,14 +975,13 @@ async def get_stove_info_wos(cog, player_id):
         raise
 
 
-async def attempt_gift_code_with_api(cog, player_id, giftcode, session):
-    """Attempt to redeem a gift code directly without captcha (Kingshot version)."""
-    cog.logger.info(f"GiftOps: Attempting gift code redemption for ID {player_id} (no captcha required)")
-
+async def redeem_giftcode_once(cog, player_id, giftcode, kid, session):
+    """Redeem one code for a player in kingdom `kid`; returns a status string."""
     data_to_encode = {
         "fid": f"{player_id}",
         "cdk": giftcode,
-        "time": f"{int(datetime.now().timestamp()*1000)}"
+        "kid": f"{kid}",
+        "time": f"{int(datetime.now().timestamp())}",  # seconds
     }
     data = encode_data(cog, data_to_encode)
 
@@ -968,7 +989,7 @@ async def attempt_gift_code_with_api(cog, player_id, giftcode, session):
         session.post, cog.wos_giftcode_url, data=data, timeout=(10, 30)
     )
 
-    log_entry_redeem = f"\n{datetime.now()} API REQ - Gift Code Redeem\nID:{player_id}, Code:{giftcode}\n"
+    log_entry_redeem = f"\n{datetime.now()} API REQ - Gift Code Redeem\nID:{player_id}, Code:{giftcode}, Kingdom:{kid}\n"
     try:
         response_json_redeem = response_giftcode.json()
         log_entry_redeem += f"Resp Code: {response_giftcode.status_code}\nResponse JSON:\n{json.dumps(response_json_redeem, indent=2)}\n"
@@ -978,42 +999,66 @@ async def attempt_gift_code_with_api(cog, player_id, giftcode, session):
     log_entry_redeem += "-" * 50 + "\n"
     cog.giftlog.info(log_entry_redeem.strip())
 
+    # Upstream hiccup: hand back to the retry cycle rather than mark the member failed.
+    if response_giftcode.status_code in (429, 502, 503, 504):
+        cog.logger.warning(f"GiftOps: HTTP {response_giftcode.status_code} redeeming for ID {player_id} - will retry")
+        return "TIMEOUT_RETRY"
+
     msg = str(response_json_redeem.get("msg", "Unknown Error")).strip('.')
     err_code = response_json_redeem.get("err_code")
 
     if msg == "SUCCESS":
-        status = "SUCCESS"
+        return "SUCCESS"
     elif msg == "RECEIVED" and err_code == 40008:
-        status = "RECEIVED"
+        return "RECEIVED"
     elif msg == "SAME TYPE EXCHANGE" and err_code == 40011:
-        status = "SAME TYPE EXCHANGE"
+        return "SAME TYPE EXCHANGE"
     elif msg == "TIME ERROR" and err_code == 40007:
-        status = "TIME_ERROR"
+        return "TIME_ERROR"
     elif msg == "CDK NOT FOUND" and err_code == 40014:
-        status = "CDK_NOT_FOUND"
+        return "CDK_NOT_FOUND"
     elif msg == "USED" and err_code == 40005:
-        status = "USAGE_LIMIT"
+        return "USAGE_LIMIT"
     elif msg == "TIMEOUT RETRY" and err_code == 40004:
-        status = "TIMEOUT_RETRY"
+        return "TIMEOUT_RETRY"
+    elif msg == "TOO FREQUENT" and err_code == 40019:
+        # Per-FID rate limit; back off and retry this member.
+        return "TIMEOUT_RETRY"
     elif msg == "NOT LOGIN":
-        status = "LOGIN_EXPIRED_MID_PROCESS"
+        return "LOGIN_EXPIRED_MID_PROCESS"
+    elif err_code == 40001 and "not exist" in msg.lower():
+        # Ghost account (no such player); alliance sync removes after repeated sightings.
+        return "ROLE_NOT_EXIST"
+    elif msg == "USER INFO ERROR" and err_code == 40020:
+        # fid+kid didn't resolve to a player - the kingdom on file is wrong/stale.
+        cog.logger.info(f"[KINGDOM MISMATCH] ID {player_id} kingdom {kid} rejected (40020) for code {giftcode}")
+        return "STATE_MISMATCH"
     elif "sign error" in msg.lower():
-        status = "SIGN_ERROR"
-        cog.logger.error(f"[SIGN ERROR] Sign error detected for ID {player_id}, code {giftcode}")
-        cog.logger.error(f"[SIGN ERROR] Response: {response_json_redeem}")
+        cog.logger.error(f"[SIGN ERROR] ID {player_id}, code {giftcode}, resp: {response_json_redeem}")
+        return "SIGN_ERROR"
     elif msg == "STOVE_LV ERROR" and err_code == 40006:
-        status = "TOO_SMALL_SPEND_MORE"
-        cog.logger.error(f"[TOWN CENTER LVL ERROR] Town Center level is too low for ID {player_id}, code {giftcode}")
-        cog.logger.error(f"[TOWN CENTER LVL ERROR] Response: {response_json_redeem}")
+        cog.logger.info(f"[TOWN CENTER LVL] Too low for ID {player_id}, code {giftcode}")
+        return "TOO_SMALL_SPEND_MORE"
     elif (msg == "RECHARGE_MONEY ERROR" and err_code == 40017) or (msg == "RECHARGE_MONEY_VIP ERROR" and err_code == 40018):
-        status = "TOO_POOR_SPEND_MORE"
-        cog.logger.error(f"[VIP LEVEL ERROR] VIP level is too low for ID {player_id}, code {giftcode}")
-        cog.logger.error(f"[VIP LEVEL ERROR] Response: {response_json_redeem}")
+        cog.logger.info(f"[VIP LVL] Too low for ID {player_id}, code {giftcode}")
+        return "TOO_POOR_SPEND_MORE"
     else:
-        status = "UNKNOWN_API_RESPONSE"
-        cog.logger.info(f"Unknown API response for {player_id}: msg='{msg}', err_code={err_code}")
+        cog.logger.info(f"Unknown API response for {player_id}: msg='{msg}', err_code={err_code}, resp={response_json_redeem}")
+        return "UNKNOWN_API_RESPONSE"
 
-    return status, None, None, None
+
+async def recover_stale_state(cog, fid, stale_kid):
+    """Stored kingdom was rejected (40020); re-probe the member's real kingdom and save it."""
+    try:
+        new_kid = await gift_state_resolver.resolve_state(cog, fid)
+    except Exception as e:
+        cog.logger.warning(f"GiftOps: kingdom recovery failed for FID {fid}: {e}")
+        return None
+    if new_kid is None or new_kid == stale_kid:
+        return None
+    await asyncio.to_thread(gift_state_resolver.set_user_kid, fid, new_kid)
+    cog.logger.info(f"GiftOps: FID {fid} moved kingdom {stale_kid} -> {new_kid}")
+    return new_kid
 
 
 async def claim_giftcode_rewards_wos(cog, player_id, giftcode, *, skip_cache: bool = False):
@@ -1043,42 +1088,25 @@ async def claim_giftcode_rewards_wos(cog, player_id, giftcode, *, skip_cache: bo
                         cog.logger.info(f"CACHE HIT - User {player_id} code '{giftcode}' status: {status}")
                         return status
 
-        # Get player session
-        session, response_stove_info = await get_stove_info_wos(cog, player_id=player_id)
-        log_entry_player = f"\n{datetime.now()} API REQUEST - Player Info\nPlayer ID: {player_id}\n"
-        try:
-            response_json_player = response_stove_info.json()
-            log_entry_player += f"Response Code: {response_stove_info.status_code}\nResponse JSON:\n{json.dumps(response_json_player, indent=2)}\n"
-        except json.JSONDecodeError:
-            log_entry_player += f"Response Code: {response_stove_info.status_code}\nResponse Text (Not JSON): {response_stove_info.text[:500]}...\n"
-        log_entry_player += "-" * 50 + "\n"
-        cog.giftlog.info(log_entry_player.strip())
-
-        try:
-            player_info_json = response_stove_info.json()
-        except json.JSONDecodeError:
-            player_info_json = {}
-        login_successful = player_info_json.get("msg") == "success"
-
-        if not login_successful:
-            # Throttles/upstream hiccups are transient: hand them to the retry cycles.
-            if response_stove_info.status_code in (429, 502, 503, 504):
-                status = "TIMEOUT_RETRY"
-            elif player_info_json.get("err_code") == 40001 and "role not exist" in str(player_info_json.get("msg", "")).lower():
-                # Same signature login_handler treats as not_found; alliance sync removes after 3 sightings.
-                status = "ROLE_NOT_EXIST"
-            else:
-                status = "LOGIN_FAILED"
-            log_message = f"{datetime.now()} Login failed for ID {player_id} ({status}): {player_info_json.get('msg', 'Unknown')}\n"
-            cog.giftlog.info(log_message.strip())
+        # Redemption needs the player's kingdom; it must be on file.
+        kid = await get_user_kid(cog, player_id)
+        if kid is None:
+            status = "NO_STATE"
+            cog.giftlog.info(f"{datetime.now()} No kingdom on file for ID {player_id}; cannot redeem '{giftcode}'.")
             return status
 
-        # Try gift code redemption
-        cog.logger.info(f"GiftOps: Starting gift code redemption for ID {player_id}")
+        session = requests.Session()
+        session.mount("https://", HTTPAdapter(max_retries=cog.retry_config))
+        session.headers.update(get_headers(cog.wos_giftcode_redemption_url))
 
-        status, _, _, _ = await attempt_gift_code_with_api(
-            cog, player_id, giftcode, session
-        )
+        cog.logger.info(f"GiftOps: Redeeming '{giftcode}' for ID {player_id} (kingdom {kid})")
+        status = await redeem_giftcode_once(cog, player_id, giftcode, kid, session)
+
+        # Stale kingdom (member transferred): re-resolve their real kingdom and retry once.
+        if status == "STATE_MISMATCH" and player_id != cog.get_test_fid():
+            new_kid = await recover_stale_state(cog, player_id, kid)
+            if new_kid is not None:
+                status = await redeem_giftcode_once(cog, player_id, giftcode, new_kid, session)
 
         # Handle database updates for successful redemptions
         if player_id != cog.get_test_fid() and status in ["SUCCESS", "RECEIVED", "SAME TYPE EXCHANGE"]:
@@ -1782,8 +1810,9 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
                         "TOO_SMALL_SPEND_MORE": f"{theme.warnIcon} **" + "{count}" + "** members failed due to insufficient town center level.",
                         "TIMEOUT_RETRY": f"{theme.timeIcon} **" + "{count}" + "** members were staring into the void, until the void finally timed out on them.",
                         "LOGIN_EXPIRED_MID_PROCESS": f"{theme.lockIcon} **" + "{count}" + "** members login failed mid-process. How'd that even happen?",
-                        "LOGIN_FAILED": f"{theme.lockIcon} **" + "{count}" + "** members failed due to login issues. Try logging it off and on again!",
                         "ROLE_NOT_EXIST": f"{theme.membersIcon} **" + "{count}" + "** members no longer exist in the game. Ghosts don't redeem codes - remove them from the alliance!",
+                        "NO_STATE": f"{theme.globeIcon} **" + "{count}" + "** members are off the map with no kingdom on file. Point them to their kingdom so the codes can find their way home!",
+                        "STATE_MISMATCH": f"{theme.globeIcon} **" + "{count}" + "** members are hiding out in the wrong kingdom - the game wasn't fooled. Update their kingdom and the rewards will follow.",
                         "SIGN_ERROR": f"{theme.lockIcon} **" + "{count}" + "** members failed due to a signature error. Something went wrong.",
                         "ERROR": f"{theme.deniedIcon} **" + "{count}" + "** members failed due to a general error. Might want to check the logs.",
                         "UNKNOWN_API_RESPONSE": f"{theme.infoIcon} **" + "{count}" + "** members failed with an unknown API response. Say what?",
@@ -1957,7 +1986,7 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
                 mark_processed = True
                 fail_reason = "Account no longer exists"
                 error_summary["ROLE_NOT_EXIST"] = error_summary.get("ROLE_NOT_EXIST", 0) + 1
-            elif response_status in ["LOGIN_FAILED", "LOGIN_EXPIRED_MID_PROCESS", "ERROR", "UNKNOWN_API_RESPONSE"]:
+            elif response_status in ["LOGIN_EXPIRED_MID_PROCESS", "ERROR", "UNKNOWN_API_RESPONSE"]:
                 add_to_failed = True
                 mark_processed = True
                 fail_reason = f"Processing Error ({response_status})"
@@ -1982,6 +2011,11 @@ async def use_giftcode_for_alliance(cog, alliance_id, giftcode, process=None):
                 mark_processed = True
                 fail_reason = "Town Center level too low"
                 error_summary["TOO_SMALL_SPEND_MORE"] = error_summary.get("TOO_SMALL_SPEND_MORE", 0) + 1
+            elif response_status == "STATE_MISMATCH":
+                add_to_failed = True
+                mark_processed = True
+                fail_reason = "Wrong kingdom on file"
+                error_summary["STATE_MISMATCH"] = error_summary.get("STATE_MISMATCH", 0) + 1
             else:
                 add_to_failed = True
                 mark_processed = True

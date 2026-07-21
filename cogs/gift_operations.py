@@ -19,6 +19,7 @@ from urllib3.util.retry import Retry
 from .gift_operationsapi import GiftCodeAPI
 from .pimp_my_bot import theme, safe_edit_message
 from . import gift_redemption
+from . import gift_state_resolver
 from . import gift_channels
 from . import gift_settings
 from .gift_views import GiftView
@@ -119,6 +120,7 @@ class GiftOperations(commands.Cog):
         self.last_validation_attempt_time = 0
         self.validation_cooldown = 5
         self._last_cleanup_date = None
+        self._state_nudge_sent = False  # one-time boot nudge about member kingdoms
 
         self.redemption_batches = {}
 
@@ -138,12 +140,19 @@ class GiftOperations(commands.Cog):
                     test_fid TEXT NOT NULL
                 )
             """)
+            cols = [r[1] for r in self.settings_cursor.execute("PRAGMA table_info(test_fid_settings)")]
+            if "kid" not in cols:
+                self.settings_cursor.execute("ALTER TABLE test_fid_settings ADD COLUMN kid INTEGER")
+                self.settings_cursor.execute(
+                    "UPDATE test_fid_settings SET kid = 259 WHERE test_fid = '43180889'")
             self.settings_cursor.execute("SELECT test_fid FROM test_fid_settings ORDER BY id DESC LIMIT 1")
             result = self.settings_cursor.fetchone()
             if not result:
-                self.settings_cursor.execute("INSERT INTO test_fid_settings (test_fid) VALUES (?)", ("43180889",))
+                self.settings_cursor.execute(
+                    "INSERT INTO test_fid_settings (test_fid, kid) VALUES (?, ?)", ("43180889", 259))
                 self.settings_conn.commit()
                 self.logger.info("Initialized default test ID (43180889) in database")
+            self.settings_conn.commit()
         except Exception as e:
             self.logger.exception(f"Error setting up test ID table: {e}")
 
@@ -218,6 +227,11 @@ class GiftOperations(commands.Cog):
 
             if not self.periodic_validation_loop.is_running():
                 self.periodic_validation_loop.start()
+
+            # One-time nudge to global admins if member kingdoms need attention.
+            if not self._state_nudge_sent:
+                self._state_nudge_sent = True
+                asyncio.create_task(self._notify_state_migration())
 
             # Register handlers with the ProcessQueue cog
             process_queue_cog = self.bot.get_cog('ProcessQueue')
@@ -353,11 +367,51 @@ class GiftOperations(commands.Cog):
     async def get_stove_info_wos(self, player_id):
         return await gift_redemption.get_stove_info_wos(self, player_id)
 
-    async def attempt_gift_code_with_api(self, player_id, giftcode, session):
-        return await gift_redemption.attempt_gift_code_with_api(self, player_id, giftcode, session)
-
     async def claim_giftcode_rewards_wos(self, player_id, giftcode, *, skip_cache: bool = False):
         return await gift_redemption.claim_giftcode_rewards_wos(self, player_id, giftcode, skip_cache=skip_cache)
+
+    def bind_alliance_states(self, *, only_unbound=True):
+        """Bind clear-majority alliances to a kingdom and auto-flag genuinely-mixed ones as
+        multistate. Returns {'bound': [...], 'multistate': [...]}."""
+        bound = gift_state_resolver.bind_all_alliances(only_unbound=only_unbound)
+        flagged = gift_state_resolver.auto_flag_multistate()
+        return {"bound": bound, "multistate": flagged}
+
+    def assign_alliance_state_to_missing(self):
+        """Fast no-API backfill: NULL-kid members inherit their alliance's bound kingdom."""
+        return gift_state_resolver.assign_alliance_kid_to_missing()
+
+    async def resolve_remaining_missing_states(self, *, deep_sweep_max=0):
+        """API-probe the members still missing a kingdom and persist what we find."""
+        fids = await asyncio.to_thread(gift_state_resolver.fids_missing_state)
+        return await gift_state_resolver.resolve_and_persist(self, fids, deep_sweep_max=deep_sweep_max)
+
+    async def _notify_state_migration(self):
+        """Once per boot, DM global admins if member kingdoms need attention"""
+        try:
+            missing = await asyncio.to_thread(gift_state_resolver.fids_missing_state)
+            survey = await asyncio.to_thread(gift_state_resolver.survey_alliance_bindings)
+            unbound = [r for r in survey if r["current_kid"] is None and not r["multistate"]]
+            if not missing and not unbound:
+                return
+            bindable = sum(1 for r in unbound if r["proposed_kid"] is not None)
+            embed = discord.Embed(
+                title=f"{theme.warnIcon} Member Kingdoms Need Attention",
+                description=(
+                    "Gift code redemption now requires each member's kingdom.\n\n"
+                    f"{theme.upperDivider}\n"
+                    f"{theme.membersIcon} **Members missing a kingdom:** `{len(missing)}`\n"
+                    f"{theme.allianceIcon} **Unbound alliances:** `{len(unbound)}` ({bindable} auto-bindable)\n"
+                    f"{theme.lowerDivider}\n\n"
+                    "Open **Alliance Management -> Member Kingdoms** and run Auto-bind, "
+                    "Assign, then Resolve. Members that already have a correct kingdom redeem fine."
+                ),
+                color=theme.emColor2,
+            )
+            from . import gift_redemption
+            await gift_redemption._dm_global_admins(self, embed)
+        except Exception as e:
+            self.logger.exception(f"Error sending kingdom-migration nudge: {e}")
 
     async def scan_historical_messages(self, channel, alliance_id):
         return await gift_redemption.scan_historical_messages(self, channel, alliance_id)
@@ -410,8 +464,8 @@ class GiftOperations(commands.Cog):
     async def verify_test_fid(self, fid):
         return await gift_settings.verify_test_fid(self, fid)
 
-    async def update_test_fid(self, new_fid):
-        return await gift_settings.update_test_fid(self, new_fid)
+    async def update_test_fid(self, new_fid, kid=None):
+        return await gift_settings.update_test_fid(self, new_fid, kid)
 
     def get_test_fid(self):
         return gift_settings.get_test_fid(self)
@@ -427,6 +481,9 @@ class GiftOperations(commands.Cog):
 
     async def show_redemption_summary(self, interaction):
         return await gift_settings.show_redemption_summary(self, interaction)
+
+    async def show_state_management(self, interaction):
+        return await gift_settings.show_state_management(self, interaction)
 
     async def setup_giftcode_auto(self, interaction):
         return await gift_settings.setup_giftcode_auto(self, interaction)

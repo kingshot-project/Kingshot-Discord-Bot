@@ -935,6 +935,8 @@ class StateManagementView(discord.ui.View):
             "└ Give members with no kingdom their alliance's kingdom (instant, no game calls)",
             f"{theme.searchIcon} **Resolve Unknown (API)**",
             f"└ Probe the game for the rest, one at a time (about {max(1, len(missing)) * 2}s total; no rewards sent)",
+            f"{theme.allianceIcon} **Multistate Alliances**",
+            "└ Mark alliances that span many kingdoms so they're never auto-bound (set members' kingdoms individually)",
             f"\n{theme.infoIcon} Can't auto-bind an alliance (too few known members)? "
             f"Set its kingdom on the alliance itself (Alliance Management -> Set Kingdom), then Assign Kingdom to Missing.",
         ]

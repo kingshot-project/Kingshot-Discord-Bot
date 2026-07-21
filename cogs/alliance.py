@@ -1675,9 +1675,9 @@ class PostCreateChannelPromptView(discord.ui.View):
 class AddAllianceModal(discord.ui.Modal):
     """Two-field alliance creator. Inserts a new alliance with safe defaults
     (interval=1440min / once a day, no channel, no start time). The optional
-    Kingdom (#) field locks the alliance to a single kingdom so non-matching
-    players are rejected on add — leave blank for no restriction. Creation
-    ends on a prompt encouraging Channel Setup for the new alliance."""
+    Kingdom (#) field sets the alliance's home kingdom for redemption and member
+    backfill - leave blank for none. Locking is a separate toggle on the hub.
+    Creation ends on a prompt encouraging Channel Setup for the new alliance."""
 
     # Daily by default
     DEFAULT_INTERVAL_MINUTES = 1440
@@ -1694,7 +1694,7 @@ class AddAllianceModal(discord.ui.Modal):
         self.add_item(self.name_input)
         self.kid_input = discord.ui.TextInput(
             label="Kingdom # (optional)",
-            placeholder="Leave blank for no kingdom restriction",
+            placeholder="The alliance's home kingdom number",
             required=False,
             max_length=10,
         )
@@ -1738,11 +1738,10 @@ class AddAllianceModal(discord.ui.Modal):
 
                 cursor.execute(
                     "INSERT INTO alliance_list (name, discord_server_id, kid, state_locked) "
-                    "VALUES (?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, 0)",
                     (alliance_name,
                      interaction.guild.id if interaction.guild else None,
-                     parsed_kid,
-                     1 if parsed_kid is not None else 0),
+                     parsed_kid),
                 )
                 alliance_id = cursor.lastrowid
                 cursor.execute(
@@ -1831,9 +1830,9 @@ class EditNameModal(discord.ui.Modal):
                 pass
 
 class EditKingdomModal(discord.ui.Modal):
-    """Single-field editor for an alliance's locked Kingdom. Empty input clears
-    the lock (sets kid to NULL); a positive integer locks the alliance to that
-    kingdom so non-matching players are rejected at add-time."""
+    """Single-field editor for an alliance's home Kingdom (kid). A positive integer
+    sets the home kingdom used for redemption and member backfill; empty input clears
+    it. This does NOT lock the alliance - locking is a separate toggle on the hub."""
 
     def __init__(self, alliance_id: int, alliance_name: str,
                  current_kid, conn, bot):
@@ -1843,8 +1842,8 @@ class EditKingdomModal(discord.ui.Modal):
         self.conn = conn
         self.bot = bot
         self.kid_input = discord.ui.TextInput(
-            label="Kingdom # (blank = no lock)",
-            placeholder="Leave blank to clear the kingdom restriction",
+            label="Kingdom # (blank = clear)",
+            placeholder="The alliance's kingdom number",
             default=("" if current_kid is None else str(current_kid)),
             required=False,
             max_length=10,
@@ -1869,14 +1868,15 @@ class EditKingdomModal(discord.ui.Modal):
         try:
             cursor = self.conn.cursor()
             if new_kid is not None:
+                # Set the home kingdom; leave any existing lock in place (now applies to it).
                 cursor.execute(
-                    "UPDATE alliance_list SET kid = ?, state_locked = 1, multistate = 0 WHERE alliance_id = ?",
+                    "UPDATE alliance_list SET kid = ?, multistate = 0 WHERE alliance_id = ?",
                     (new_kid, self.alliance_id),
                 )
             else:
-                # Clear only the lock; keep kid as the alliance's home kingdom for redemption.
+                # Clearing the home kingdom can't leave a lock pointing at nothing.
                 cursor.execute(
-                    "UPDATE alliance_list SET state_locked = 0 WHERE alliance_id = ?",
+                    "UPDATE alliance_list SET kid = NULL, state_locked = 0 WHERE alliance_id = ?",
                     (self.alliance_id,),
                 )
             self.conn.commit()
@@ -1893,13 +1893,13 @@ class EditKingdomModal(discord.ui.Modal):
 
         if new_kid is None:
             result = (
-                f"{theme.verifiedIcon} **{self.alliance_name}** kingdom lock cleared. "
-                f"Players from any kingdom can now be added."
+                f"{theme.verifiedIcon} **{self.alliance_name}** home kingdom cleared."
             )
         else:
             result = (
-                f"{theme.verifiedIcon} **{self.alliance_name}** locked to Kingdom #{new_kid}. "
-                f"Only players in this kingdom can be added going forward."
+                f"{theme.verifiedIcon} **{self.alliance_name}** home kingdom set to #{new_kid}. "
+                f"Members can inherit it and redemption will use it. Use **Kingdom Lock** to also "
+                f"reject players from other kingdoms."
             )
 
         # Return to the hub and report the result.

@@ -55,6 +55,88 @@ def format_speedups(minutes: int) -> str:
     return " ".join(parts) if parts else "0m"
 
 
+# KvK "Pro mode" training-day scoring. Time in seconds, KvK points per troop, by troop tier.
+KVK_TRAIN_TIME = {1: 12, 2: 17, 3: 24, 4: 32, 5: 44, 6: 60, 7: 83, 8: 113, 9: 131, 10: 152, 11: 180}
+KVK_POINTS = {1: 3, 2: 4, 3: 5, 4: 8, 5: 12, 6: 18, 7: 25, 8: 35, 9: 45, 10: 60, 11: 75}
+MAX_TROOP_LEVEL = 11
+
+_COUNT_SUFFIX = {"k": 1000, "к": 1000, "m": 1_000_000, "м": 1_000_000}  # Latin + Cyrillic k/m
+
+
+def parse_troop_count(text: str) -> int:
+    """Parse a troop count like '900k', '900000', '1.5m' (Latin or Cyrillic k/m) into an int. '' -> 0."""
+    s = text.strip().lower().replace(",", "").replace(" ", "")
+    if not s:
+        return 0
+    mult = 1
+    if s[-1] in _COUNT_SUFFIX:
+        mult = _COUNT_SUFFIX[s[-1]]
+        s = s[:-1]
+    try:
+        value = float(s) * mult
+    except ValueError:
+        raise ValueError(f"could not parse troop count: {text!r}") from None
+    if value < 0:
+        raise ValueError(f"troop count cannot be negative: {text!r}")
+    return int(value)
+
+
+def compute_training_points(base_level, hours_minutes, upgrade_from=None, upgrade_count=0) -> dict:
+    """KvK training-day points from speedup time, honoring optional troop upgrades first.
+
+    Upgrades (upgrade_count troops from upgrade_from up to base_level) each take
+    training_time[base] - training_time[from] seconds and earn points[base] - points[from]. Only as
+    many as the speedup time allows are upgraded; the rest of the time trains new base-level troops
+    (points[base] each). Returns a breakdown dict; the total is under "kvk_points".
+    """
+    if base_level not in KVK_POINTS:
+        raise ValueError(f"unknown troop level: {base_level}")
+    total_seconds = max(0, int(hours_minutes)) * 60
+    base_time = KVK_TRAIN_TIME[base_level]
+    base_points = KVK_POINTS[base_level]
+
+    upgraded = 0
+    upgrade_points = 0
+    remaining = total_seconds
+    if upgrade_count and upgrade_count > 0 and upgrade_from is not None:
+        if upgrade_from not in KVK_POINTS:
+            raise ValueError(f"unknown upgrade level: {upgrade_from}")
+        if upgrade_from >= base_level:
+            raise ValueError("upgrade level must be below the base troop level")
+        time_each = base_time - KVK_TRAIN_TIME[upgrade_from]  # positive: times increase with tier
+        upgraded = min(upgrade_count, remaining // time_each)
+        remaining -= upgraded * time_each
+        upgrade_points = upgraded * (base_points - KVK_POINTS[upgrade_from])
+
+    new_troops = remaining // base_time
+    new_points = new_troops * base_points
+    return {
+        "kvk_points": upgrade_points + new_points,
+        "new_troops": new_troops, "new_points": new_points,
+        "upgraded": upgraded, "upgrade_points": upgrade_points,
+    }
+
+
+# Base-level choices for Pro mode. TG* are subgroups that share their tier's time/points; they can be
+# picked as a base level, but troops are never upgraded from or to a TG (only between plain tiers).
+TROOP_LEVELS = [
+    "T11", "T11-TG5", "T10", "T10-TG1", "T10-TG2", "T10-TG3", "T10-TG4", "T10-TG5",
+    "T9", "T8", "T7", "T6", "T5", "T4", "T3", "T2", "T1",
+]
+_TG_TIER = {"T11-TG5": 11, "T10-TG1": 10, "T10-TG2": 10, "T10-TG3": 10, "T10-TG4": 10, "T10-TG5": 10}
+
+
+def troop_tier(label) -> int:
+    """Resolve a base-level label ('T10', 'T10-TG3', 'T11-TG5', or '10') to its scoring tier (1-11)."""
+    text = str(label).strip()
+    if text in _TG_TIER:
+        return _TG_TIER[text]
+    m = re.fullmatch(r"[Tt]?(\d+)", text)
+    if m and int(m.group(1)) in KVK_POINTS:
+        return int(m.group(1))
+    raise ValueError(f"unknown troop level: {label!r}")
+
+
 def generate_time_slots(slot_mode: int) -> list[str]:
     """Daily 30-min slot grid. Mode 0: 00:00..23:30 (48). Mode 1: offset, 49 entries.
     Mirrors MinisterSchedule.get_time_slots (cogs/minister_schedule.py:288)."""

@@ -1,13 +1,74 @@
 import pytest
 
 from cogs.kvk_util import (
+    compute_training_points,
     format_speedups,
     generate_time_slots,
     parse_desired_slots,
     parse_speedups,
+    parse_troop_count,
     rank_and_assign,
+    troop_tier,
     type_dates_for,
 )
+
+
+def test_compute_training_points_example():
+    # base T10, 20h, upgrade 900k from T9: 3428 fit (21s each), 51420 pts, ~0 new
+    r = compute_training_points(10, 20 * 60, upgrade_from=9, upgrade_count=900_000)
+    assert r["upgraded"] == 3428
+    assert r["upgrade_points"] == 3428 * 15
+    assert r["new_troops"] == 0
+    assert r["kvk_points"] == 51420
+
+
+def test_compute_training_points_no_upgrade():
+    r = compute_training_points(10, 20 * 60)   # 72000s / 152s = 473 troops
+    assert r["new_troops"] == 473 and r["kvk_points"] == 473 * 60
+    assert r["upgraded"] == 0
+
+
+def test_compute_training_points_upgrade_fits():
+    r = compute_training_points(10, 10, upgrade_from=9, upgrade_count=5)  # 600s
+    assert r["upgraded"] == 5 and r["upgrade_points"] == 5 * 15
+    assert r["new_troops"] == 3 and r["kvk_points"] == 5 * 15 + 3 * 60  # 255
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"base_level": 12, "hours_minutes": 60},                              # unknown base level
+    {"base_level": 10, "hours_minutes": 60, "upgrade_from": 10, "upgrade_count": 5},  # from >= base
+    {"base_level": 10, "hours_minutes": 60, "upgrade_from": 12, "upgrade_count": 5},  # unknown from
+])
+def test_compute_training_points_bad(kwargs):
+    with pytest.raises(ValueError):
+        compute_training_points(**kwargs)
+
+
+@pytest.mark.parametrize("text,count", [
+    ("900k", 900_000), ("900к", 900_000), ("1.5m", 1_500_000), ("900000", 900_000),
+    ("900,000", 900_000), ("", 0), ("2м", 2_000_000),
+])
+def test_parse_troop_count_ok(text, count):
+    assert parse_troop_count(text) == count
+
+
+@pytest.mark.parametrize("bad", ["abc", "-5", "1..5k"])
+def test_parse_troop_count_bad(bad):
+    with pytest.raises(ValueError):
+        parse_troop_count(bad)
+
+
+@pytest.mark.parametrize("label,tier", [
+    ("T10", 10), ("T10-TG3", 10), ("T11-TG5", 11), ("10", 10), ("T11", 11), ("t9", 9),
+])
+def test_troop_tier_ok(label, tier):
+    assert troop_tier(label) == tier
+
+
+@pytest.mark.parametrize("bad", ["T12", "TGx", "abc", "T0"])
+def test_troop_tier_bad(bad):
+    with pytest.raises(ValueError):
+        troop_tier(bad)
 
 
 @pytest.mark.parametrize("text,indices", [

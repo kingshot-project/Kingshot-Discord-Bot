@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import kvk_data as kvkdb
-from .kvk_util import generate_time_slots, rank_and_assign
+from .kvk_util import format_speedups, generate_time_slots, rank_and_assign
 
 VIEW_TIMEOUT = 7200
 _FIELD_LIMIT = 1024
@@ -158,6 +158,42 @@ def _type_embeds(ev: dict, position_type: str, rows: list, minutes_map: dict, ni
     return embeds
 
 
+def _signups_embeds(conn, event_id) -> list:
+    """Every raw signup for an event, ranked per position type. For the menu View button."""
+    ev = kvkdb.get_event(conn, event_id)
+    if ev is None:
+        return [discord.Embed(
+            title="Unknown event", description=f"No event with id {event_id}.", color=discord.Color.red())]
+    active_types = kvkdb.get_active_types(conn, event_id)
+    per_type: dict = {}
+    all_fids: set = set()
+    for position_type in active_types:
+        ranked = sorted(
+            kvkdb.get_signups(conn, event_id, position_type),
+            key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+        per_type[position_type] = ranked
+        all_fids.update(s["fid"] for s in ranked)
+    nicknames = _nicknames_for(all_fids)
+
+    title = f"{ev['name']} - signups"
+    cont_title = f"{title} (cont.)"
+    embeds = [discord.Embed(title=title, color=discord.Color.blue())]
+    used = len(title)
+    for position_type in active_types:
+        signups = per_type[position_type]
+        lines = []
+        for s in signups:
+            nick = nicknames.get(s["fid"], f"Unknown ({s['fid']})")
+            lines.append(f"{nick} ({s['fid']}): {format_speedups(s['speedup_minutes'])}")
+        if not lines:
+            lines = ["(no signups)"]
+        for i, chunk in enumerate(_chunk_lines(lines, _FIELD_LIMIT)):
+            name = f"{position_type} ({len(signups)})" if i == 0 else f"{position_type} (cont.)"
+            used = _add_paged_field(
+                embeds, discord.Embed(title=cont_title, color=discord.Color.blue()), used, name, chunk)
+    return embeds
+
+
 class _ScheduleLayout(discord.ui.LayoutView):
     """A single Components-v2 message: one accent-coloured container of schedule text."""
 
@@ -247,20 +283,21 @@ class KvkReport(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    def _compute(self, conn, event_id) -> bool:
-        """Rank signups and auto-assign slots for every active type, honoring existing locks."""
+    def _assignment_rows(self, conn, event_id) -> dict:
+        """Rank and place every group in memory, honoring existing locks. Writes nothing.
+
+        Returns {(position_type, alliance_id): [slot rows]}. Shared by _compute (which persists and
+        closes signups) and _preview_embeds (which renders without persisting or closing signups).
+        """
         ev = kvkdb.get_event(conn, event_id)
-        if not ev:
-            return False
         slot_mode = ev["slot_mode"]
         full_day = len(generate_time_slots(slot_mode))
+        groups: dict = {}
         for position_type in kvkdb.get_active_types(conn, event_id):
             signups = kvkdb.get_signups(conn, event_id, position_type)
             if ev["scope"] == "kingdom":
                 locks = kvkdb.get_locks(conn, event_id, position_type, 0)
-                kvkdb.save_slots(
-                    conn, event_id, position_type, 0,
-                    rank_and_assign(signups, full_day, slot_mode, locked=locks))
+                groups[(position_type, 0)] = rank_and_assign(signups, full_day, slot_mode, locked=locks)
             else:
                 by_alliance: dict = {}
                 for s in signups:
@@ -271,21 +308,41 @@ class KvkReport(commands.Cog):
                 n = ev["slots_per_alliance"] or 0
                 for aid_int, group in by_alliance.items():
                     locks = kvkdb.get_locks(conn, event_id, position_type, aid_int)
-                    kvkdb.save_slots(
-                        conn, event_id, position_type, aid_int,
-                        rank_and_assign(group, n, slot_mode, locked=locks))
+                    groups[(position_type, aid_int)] = rank_and_assign(group, n, slot_mode, locked=locks)
+        return groups
+
+    def _compute(self, conn, event_id) -> bool:
+        """Rank signups and auto-assign slots for every active type, honoring existing locks."""
+        if kvkdb.get_event(conn, event_id) is None:
+            return False
+        for (position_type, aid), rows in self._assignment_rows(conn, event_id).items():
+            kvkdb.save_slots(conn, event_id, position_type, aid, rows)
         kvkdb.set_status(conn, event_id, "assigned")
         return True
 
-    def _render_embeds(self, conn, event_id) -> list:
-        """One embed per active position type, plus a notes embed for skipped signups."""
+    def _preview_embeds(self, conn, event_id) -> list:
+        """Render what Report / Assign would produce, without saving or closing signups (dry run)."""
+        slots = []
+        for (position_type, aid), rows in self._assignment_rows(conn, event_id).items():
+            for r in rows:
+                slots.append({
+                    "position_type": position_type, "alliance_id": aid, "slot_index": r["slot_index"],
+                    "slot_time": r["slot_time"], "fid": r["fid"], "locked": r["locked"]})
+        return self._render_embeds(conn, event_id, slots=slots)
+
+    def _render_embeds(self, conn, event_id, slots=None) -> list:
+        """One embed per active position type, plus a notes embed for skipped signups.
+
+        Pass `slots` to render a set of rows that is not (yet) in the database, e.g. a preview.
+        """
         ev = kvkdb.get_event(conn, event_id)
         if ev is None:
             return [discord.Embed(
                 title="Unknown event", description=f"No event with id {event_id}.", color=discord.Color.red())]
 
         minutes_map = kvkdb.get_signup_minutes(conn, event_id)
-        slots = kvkdb.get_slots(conn, event_id)
+        if slots is None:
+            slots = kvkdb.get_slots(conn, event_id)
         nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
 
         by_type: dict = {}
@@ -405,6 +462,20 @@ class KvkReport(commands.Cog):
                 f"Override select shows first {_MAX_GROUP_OPTIONS} of {len(view.groups)} groups.", ephemeral=True)
         if not view.groups:
             await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
+
+    async def launch_view_signups(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Show every raw signup for an event, ranked. Used by the /settings KvK menu View button."""
+        sched = self.bot.get_cog("KvkScheduling")
+        if sched is None or not sched._is_global_admin(interaction):
+            await interaction.response.send_message("Global Admin only.", ephemeral=True)
+            return
+        if kvkdb.get_event(sched.conn, event_id) is None:
+            await interaction.response.send_message(f"Unknown event: {event_id}.", ephemeral=True)
+            return
+        embeds = _signups_embeds(sched.conn, event_id)
+        await interaction.response.send_message(embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
+        for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
+            await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
 
     async def launch_publish(self, interaction: discord.Interaction, event_id: int) -> None:
         """Publish the schedule. Shared by /kvk_publish and the /settings KvK menu."""
@@ -637,12 +708,24 @@ class _ConfirmReportView(discord.ui.View):
         yes_button = discord.ui.Button(label="Yes, run it", style=discord.ButtonStyle.primary)
         yes_button.callback = self.confirm
         self.add_item(yes_button)
+        preview_button = discord.ui.Button(label="Preview", style=discord.ButtonStyle.secondary)
+        preview_button.callback = self.preview
+        self.add_item(preview_button)
         cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
         cancel_button.callback = self.cancel
         self.add_item(cancel_button)
 
     async def confirm(self, interaction: discord.Interaction):
         await self.report_cog._run_report(interaction, self.event_id, edit=True)
+
+    async def preview(self, interaction: discord.Interaction):
+        sched = self.report_cog.bot.get_cog("KvkScheduling")
+        embeds = self.report_cog._preview_embeds(sched.conn, self.event_id)
+        await interaction.response.send_message(
+            content="Preview only - nothing saved, signups stay open. Run it to commit.",
+            embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
+        for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
+            await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
 
     async def cancel(self, interaction: discord.Interaction):
         await interaction.response.edit_message(content="Report cancelled.", view=None)

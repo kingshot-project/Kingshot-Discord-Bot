@@ -646,6 +646,11 @@ class _KvkMenuView(discord.ui.View):
             delete_button.callback = self.delete
             self.add_item(delete_button)
 
+            view_button = discord.ui.Button(
+                label="View signups", emoji=theme.eyeIcon, style=discord.ButtonStyle.secondary, row=2)
+            view_button.callback = self.view
+            self.add_item(view_button)
+
         back_button = discord.ui.Button(
             label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=2)
         back_button.callback = self.back
@@ -763,6 +768,16 @@ class _KvkMenuView(discord.ui.View):
         if not await self._require_event(interaction):
             return
         await interaction.response.send_modal(_EditSignupModal(self.cog, self.selected_event_id))
+
+    async def view(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        report_cog = self._report_cog()
+        if report_cog is None:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
+            return
+        await report_cog.launch_view_signups(interaction, self.selected_event_id)
 
     async def delete(self, interaction: discord.Interaction):
         if not await self._require_event(interaction):

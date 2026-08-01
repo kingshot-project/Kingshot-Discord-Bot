@@ -58,6 +58,31 @@ def test_list_events_scoped_to_guild_newest_first():
     assert events[0]["name"] == "Second" and events[0]["scope"] == "alliance"
 
 
+def test_list_open_events_filters_status_window_and_guild():
+    c = _conn()
+    common = {
+        "event_date": "2026-09-01", "scope": "kingdom", "slots_per_alliance": None, "slot_mode": 0,
+        "publish_channel_id": None, "created_by": 1, "created_at": "x",
+    }
+    open_now = kvk.create_event(
+        c, guild_id=5, name="Open", signup_open_at="2026-08-01 00:00",
+        signup_close_at="2026-08-31 00:00", **common)
+    kvk.create_event(
+        c, guild_id=5, name="Not yet", signup_open_at="2026-09-01 00:00",
+        signup_close_at="2026-09-30 00:00", **common)  # window not started
+    closed = kvk.create_event(
+        c, guild_id=5, name="Closed", signup_open_at="2026-07-01 00:00",
+        signup_close_at="2026-07-31 00:00", **common)  # window ended
+    kvk.set_status(c, closed, "assigned")  # also not 'collecting'
+    kvk.create_event(
+        c, guild_id=99, name="Other guild", signup_open_at="2026-08-01 00:00",
+        signup_close_at="2026-08-31 00:00", **common)  # different guild
+
+    events = kvk.list_open_events(c, 5, "2026-08-15 12:00")
+    assert [e["id"] for e in events] == [open_now]
+    assert events[0]["name"] == "Open" and events[0]["event_date"] == "2026-09-01"
+
+
 def test_slots_save_override_and_locks():
     c = _conn()
     eid = kvk.create_event(

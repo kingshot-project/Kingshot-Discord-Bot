@@ -1,7 +1,22 @@
 """Pure, dependency-free helpers for the KvK scheduler (no discord/sqlite imports)."""
 import re
+from datetime import datetime, timedelta
 
 POSITION_TYPES = ("Training", "Research", "Building")
+
+# KvK day of each minister position, as an offset in days from the event start date (day 1).
+_TYPE_DAY_OFFSET = {"Building": 0, "Research": 1, "Training": 3}
+
+
+def type_dates_for(event_date: str, active_types) -> list[tuple[str, str]]:
+    """Compute each active position type's date from the event start date (day 1).
+
+    Building = day 1 (offset 0), Research = day 2 (+1), Training = day 4 (+3).
+    Returns (position_type, YYYY-MM-DD) pairs in day order.
+    """
+    base = datetime.strptime(event_date, "%Y-%m-%d")
+    ordered = sorted(active_types, key=lambda t: _TYPE_DAY_OFFSET[t])
+    return [(t, (base + timedelta(days=_TYPE_DAY_OFFSET[t])).strftime("%Y-%m-%d")) for t in ordered]
 
 _UNIT_MINUTES = {"d": 1440, "h": 60, "m": 1}
 _TOKEN_RE = re.compile(r"(\d+)\s*([dhm])")

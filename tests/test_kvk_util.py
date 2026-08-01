@@ -1,6 +1,17 @@
 import pytest
 
-from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign
+from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign, type_dates_for
+
+
+def test_type_dates_for_offsets_and_day_order():
+    # Building = day 1 (offset 0), Research = day 2 (+1), Training = day 4 (+3), returned in day order.
+    got = type_dates_for("2026-09-01", ["Training", "Research", "Building"])
+    assert got == [("Building", "2026-09-01"), ("Research", "2026-09-02"), ("Training", "2026-09-04")]
+
+
+def test_type_dates_for_subset_and_month_rollover():
+    assert type_dates_for("2026-09-30", ["Training"]) == [("Training", "2026-10-03")]
+    assert type_dates_for("2026-09-01", ["Research"]) == [("Research", "2026-09-02")]
 
 
 @pytest.mark.parametrize("text,minutes", [

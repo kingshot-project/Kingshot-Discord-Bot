@@ -78,6 +78,21 @@ def list_events(conn, guild_id):
     return [dict(zip(keys, r, strict=True)) for r in rows]
 
 
+def list_open_events(conn, guild_id, now):
+    """Events open for signup right now: status 'collecting' and now within the signup window.
+
+    now is a 'YYYY-MM-DD HH:MM' string, compared against signup_open_at/close_at as text.
+    """
+    rows = conn.execute(
+        """SELECT id, name, event_date FROM kvk_events
+           WHERE guild_id = ? AND status = 'collecting'
+             AND signup_open_at <= ? AND ? <= signup_close_at
+           ORDER BY id DESC""",
+        (guild_id, now, now)).fetchall()
+    keys = ("id", "name", "event_date")
+    return [dict(zip(keys, r, strict=True)) for r in rows]
+
+
 def set_status(conn, event_id, status) -> None:
     conn.execute("UPDATE kvk_events SET status = ? WHERE id = ?", (status, event_id))
     conn.commit()

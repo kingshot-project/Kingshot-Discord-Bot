@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import kvk_data as kvkdb
-from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups
+from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups, type_dates_for
 from .permission_handler import PermissionManager
 from .pimp_my_bot import check_interaction_user, safe_edit_message, theme
 
@@ -18,6 +18,8 @@ DATE_FMT = "%Y-%m-%d"
 DT_FMT = "%Y-%m-%d %H:%M"
 VIEW_TIMEOUT = 7200
 _MAX_EVENT_OPTIONS = 25  # Discord caps a select at 25 options
+# What each slot grid means, shown in the wizard so "Mode 0 / Mode 1" is not opaque.
+_SLOT_MODE_HINT = {0: "starts 00:00, on :00/:30", 1: "starts 00:15, on :15/:45"}
 
 
 class KvkScheduling(commands.Cog):
@@ -67,19 +69,35 @@ class KvkScheduling(commands.Cog):
         view = _KvkMenuView(self, interaction.guild_id, interaction.user.id)
         await safe_edit_message(interaction, embed=view.build_embed(), view=view, content=None)
 
-    @app_commands.command(name="kvk_signup", description="Sign up for a KvK event (any registered player).")
-    @app_commands.describe(event_id="The KvK event ID")
-    async def kvk_signup(self, interaction: discord.Interaction, event_id: int):
+    @app_commands.command(name="kvk_signup", description="Sign up for the open KvK event (any registered player).")
+    async def kvk_signup(self, interaction: discord.Interaction):
         fids = self._fids_for_discord(interaction.user.id)
         if not fids:
             await interaction.response.send_message("No linked fid found. Run /register first.", ephemeral=True)
             return
+        now = datetime.now(UTC).strftime(DT_FMT)
+        open_events = kvkdb.list_open_events(self.conn, interaction.guild_id, now)
+        if not open_events:
+            await interaction.response.send_message(
+                "No KvK event is open for signup right now.", ephemeral=True)
+            return
+        if len(open_events) == 1:
+            await self._pick_fid_then_signup(interaction, open_events[0]["id"], fids)
+            return
+        view = _EventSignupSelectView(self, open_events, fids)
+        await interaction.response.send_message(
+            "Pick the KvK event to sign up for:", view=view, ephemeral=True)
+
+    async def _pick_fid_then_signup(
+        self, interaction: discord.Interaction, event_id: int, fids: list[int], *, edit: bool = False
+    ) -> None:
+        """Resolve which fid signs up (auto if one, picker if many), then start the signup."""
         if len(fids) == 1:
-            await self._start_signup(interaction, event_id, fids[0])
+            await self._start_signup(interaction, event_id, fids[0], edit=edit)
             return
         view = _FidSelectView(self, event_id, fids)
-        await interaction.response.send_message(
-            "You have more than one linked fid. Pick one:", view=view, ephemeral=True)
+        await self._send_or_edit(
+            interaction, "You have more than one linked fid. Pick one:", view=view, edit=edit)
 
     @app_commands.command(name="kvk_edit_signup", description="Edit a player's KvK signup (Global Admin only).")
     @app_commands.describe(event_id="The KvK event ID", fid="The player's in-game fid")
@@ -234,9 +252,11 @@ class _SlotModeSelect(discord.ui.Select):
     def __init__(self, wizard_view: "_KvkWizardView"):
         options = [
             discord.SelectOption(
-                label=f"Mode 0 - {len(generate_time_slots(0))} slots", value="0", default=True),
+                label=f"Mode 0 - {len(generate_time_slots(0))} slots ({_SLOT_MODE_HINT[0]})",
+                value="0", default=True),
             discord.SelectOption(
-                label=f"Mode 1 - {len(generate_time_slots(1))} slots", value="1"),
+                label=f"Mode 1 - {len(generate_time_slots(1))} slots ({_SLOT_MODE_HINT[1]})",
+                value="1"),
         ]
         super().__init__(placeholder="Pick the slot grid mode", options=options, min_values=1, max_values=1)
         self.wizard_view = wizard_view
@@ -289,7 +309,11 @@ class _KvkWizardView(discord.ui.View):
 
     def build_embed(self) -> discord.Embed:
         d = self.draft
-        types_text = ", ".join(d.active_types) if d.active_types else "(pick at least one)"
+        if d.active_types:
+            types_text = "\n".join(
+                f"{t}: {date}" for t, date in type_dates_for(d.event_date, d.active_types))
+        else:
+            types_text = "(pick at least one)"
         channel_text = f"<#{d.publish_channel_id}>" if d.publish_channel_id else "(pick a channel)"
         n_text = str(d.slots_per_alliance) if d.scope == "alliance" else "n/a (kingdom scope)"
         embed = discord.Embed(title="Create KvK Event", color=discord.Color.blue())
@@ -297,7 +321,8 @@ class _KvkWizardView(discord.ui.View):
         embed.add_field(name="Event date", value=d.event_date, inline=True)
         embed.add_field(name="Scope", value=d.scope, inline=True)
         embed.add_field(name="Slots per alliance", value=n_text, inline=True)
-        embed.add_field(name="Slot mode", value=str(d.slot_mode), inline=True)
+        embed.add_field(
+            name="Slot mode", value=f"{d.slot_mode} ({_SLOT_MODE_HINT[d.slot_mode]})", inline=True)
         embed.add_field(name="Signup window (UTC)", value=f"{d.signup_open_at} to {d.signup_close_at}", inline=False)
         embed.add_field(name="Active types", value=types_text, inline=False)
         embed.add_field(name="Publish channel", value=channel_text, inline=False)
@@ -321,59 +346,34 @@ class _KvkWizardView(discord.ui.View):
                     f"Slots per alliance ({d.slots_per_alliance}) is more than "
                     f"the grid size ({max_slots}).", ephemeral=True)
                 return
-        await interaction.response.send_modal(_KvkTypeDatesModal(self.cog, self))
 
-
-class _KvkTypeDatesModal(discord.ui.Modal, title="Set Position Type Dates"):
-    """Final step: one date per active position type, then create the event."""
-
-    def __init__(self, cog: KvkScheduling, wizard_view: _KvkWizardView):
-        super().__init__()
-        self.cog = cog
-        self.wizard_view = wizard_view
-        self.date_inputs: dict[str, discord.ui.TextInput] = {}
-        for position_type in wizard_view.draft.active_types:
-            text_input = discord.ui.TextInput(
-                label=f"{position_type} date (YYYY-MM-DD)",
-                default=wizard_view.draft.event_date,
-                max_length=10,
-            )
-            self.date_inputs[position_type] = text_input
-            self.add_item(text_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        type_dates: list[tuple[str, str]] = []
-        for position_type, text_input in self.date_inputs.items():
-            try:
-                type_date = datetime.strptime(text_input.value.strip(), DATE_FMT).strftime(DATE_FMT)
-            except ValueError:
-                await interaction.response.send_message(
-                    f"{position_type} date must use format YYYY-MM-DD.", ephemeral=True)
-                return
-            type_dates.append((position_type, type_date))
-
-        draft = self.wizard_view.draft
+        type_dates = type_dates_for(d.event_date, d.active_types)
         event_id = kvkdb.create_event(
             self.cog.conn,
-            guild_id=draft.guild_id,
-            name=draft.name,
-            event_date=draft.event_date,
-            scope=draft.scope,
-            slots_per_alliance=draft.slots_per_alliance,
-            slot_mode=draft.slot_mode,
-            signup_open_at=draft.signup_open_at,
-            signup_close_at=draft.signup_close_at,
-            publish_channel_id=draft.publish_channel_id,
-            created_by=draft.created_by,
+            guild_id=d.guild_id,
+            name=d.name,
+            event_date=d.event_date,
+            scope=d.scope,
+            slots_per_alliance=d.slots_per_alliance,
+            slot_mode=d.slot_mode,
+            signup_open_at=d.signup_open_at,
+            signup_close_at=d.signup_close_at,
+            publish_channel_id=d.publish_channel_id,
+            created_by=d.created_by,
             created_at=datetime.now(UTC).strftime(DT_FMT),
         )
         kvkdb.set_event_types(self.cog.conn, event_id, type_dates)
 
-        posted = await _post_announcement(interaction.client, draft, event_id, type_dates)
+        posted = await _post_announcement(interaction.client, d, event_id, type_dates)
 
         result_embed = discord.Embed(title="KvK event created", color=discord.Color.green())
         result_embed.add_field(name="Event ID", value=str(event_id), inline=True)
-        result_embed.add_field(name="Name", value=draft.name, inline=True)
+        result_embed.add_field(name="Name", value=d.name, inline=True)
+        result_embed.add_field(
+            name="Type dates",
+            value="\n".join(f"{t}: {date}" for t, date in type_dates),
+            inline=False,
+        )
         if not posted:
             result_embed.add_field(
                 name="Announcement",
@@ -398,7 +398,7 @@ async def _post_announcement(
     types_text = "\n".join(f"{position_type}: {type_date}" for position_type, type_date in type_dates)
     embed = discord.Embed(
         title=f"KvK Event: {draft.name}",
-        description=f"Run `/kvk_signup event_id:{event_id}` to sign up.",
+        description="Run `/kvk_signup` to sign up.",
         color=discord.Color.gold(),
     )
     embed.add_field(name="Event ID", value=str(event_id), inline=True)
@@ -432,6 +432,28 @@ class _FidSelectView(discord.ui.View):
     def __init__(self, cog: KvkScheduling, event_id: int, fids: list[int]):
         super().__init__(timeout=VIEW_TIMEOUT)
         self.add_item(_FidSelect(cog, event_id, fids))
+
+
+class _EventSignupSelect(discord.ui.Select):
+    def __init__(self, cog: KvkScheduling, events: list, fids: list[int]):
+        options = [
+            discord.SelectOption(label=e["name"][:100], value=str(e["id"]), description=e["event_date"])
+            for e in events[:_MAX_EVENT_OPTIONS]
+        ]
+        super().__init__(placeholder="Pick an event", options=options, min_values=1, max_values=1)
+        self.cog = cog
+        self.fids = fids
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog._pick_fid_then_signup(interaction, int(self.values[0]), self.fids, edit=True)
+
+
+class _EventSignupSelectView(discord.ui.View):
+    """Lets a player pick which open KvK event to sign up for when more than one is open."""
+
+    def __init__(self, cog: KvkScheduling, events: list, fids: list[int]):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.add_item(_EventSignupSelect(cog, events, fids))
 
 
 class _SignupTypeSelect(discord.ui.Select):

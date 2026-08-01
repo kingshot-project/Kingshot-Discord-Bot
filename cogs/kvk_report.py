@@ -290,6 +290,8 @@ class KvkReport(commands.Cog):
         closes signups) and _preview_embeds (which renders without persisting or closing signups).
         """
         ev = kvkdb.get_event(conn, event_id)
+        if ev is None:  # event deleted while a confirm/preview view was still open
+            return {}
         slot_mode = ev["slot_mode"]
         full_day = len(generate_time_slots(slot_mode))
         groups: dict = {}
@@ -720,6 +722,9 @@ class _ConfirmReportView(discord.ui.View):
 
     async def preview(self, interaction: discord.Interaction):
         sched = self.report_cog.bot.get_cog("KvkScheduling")
+        if sched is None:
+            await interaction.response.send_message("KvK Scheduling module not found.", ephemeral=True)
+            return
         embeds = self.report_cog._preview_embeds(sched.conn, self.event_id)
         await interaction.response.send_message(
             content="Preview only - nothing saved, signups stay open. Run it to commit.",

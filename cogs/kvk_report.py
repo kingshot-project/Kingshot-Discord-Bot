@@ -322,9 +322,16 @@ class KvkReport(commands.Cog):
             await interaction.response.send_message("No publish channel set.", ephemeral=True)
             return
         again = " again" if ev["status"] == "published" else ""
+        message = (
+            f"Publish '{ev['name']}' to <#{ev['publish_channel_id']}>{again}?\n\n"
+            f"What this does:\n"
+            f"- posts the full schedule to that channel (everyone there can see it)\n"
+            f"- marks the event as \"published\"\n\n"
+            f"Signups for this event are already closed at this stage - they close when you run "
+            f"Report / Assign, not here - and publishing does not reopen them."
+        )
         await interaction.response.send_message(
-            f"Publish '{ev['name']}' to <#{ev['publish_channel_id']}>{again}? This posts publicly.",
-            view=_ConfirmPublishView(self, conn, event_id), ephemeral=True)
+            message, view=_ConfirmPublishView(self, conn, event_id), ephemeral=True)
 
     async def _do_publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
         """Post the report to the publish channel and mark it published.

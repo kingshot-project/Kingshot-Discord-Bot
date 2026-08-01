@@ -163,12 +163,23 @@ def _type_embeds(ev: dict, position_type: str, rows: list, minutes_map: dict, ni
     return embeds
 
 
+def _fmt_desired(indices, times) -> str:
+    """Compact preferred-times suffix for a signup line, e.g. ' - wants 20:00-22:00 (5 slots)'."""
+    picks = [times[i] for i in indices if 0 <= i < len(times)]
+    if not picks:
+        return ""
+    if len(picks) <= 4:
+        return " - wants " + ", ".join(picks)
+    return f" - wants {picks[0]}-{picks[-1]} ({len(picks)} slots)"
+
+
 def _signups_embeds(conn, event_id) -> list:
     """Every raw signup for an event, ranked per position type. For the menu View button."""
     ev = kvkdb.get_event(conn, event_id)
     if ev is None:
         return [discord.Embed(
             title="Unknown event", description=f"No event with id {event_id}.", color=discord.Color.red())]
+    grid = generate_time_slots(ev["slot_mode"])
     active_types = kvkdb.get_active_types(conn, event_id)
     per_type: dict = {}
     all_fids: set = set()
@@ -190,7 +201,8 @@ def _signups_embeds(conn, event_id) -> list:
         lines = []
         for rank, s in enumerate(signups, 1):
             nick = nicknames.get(s["fid"], "Unknown")  # the fid is shown separately below
-            lines.append(f"{rank}. {nick} ({s['fid']}) - **{format_speedups(s['speedup_minutes'])}**")
+            pref = _fmt_desired(s.get("desired_slots", []), grid)
+            lines.append(f"{rank}. {nick} ({s['fid']}) - **{format_speedups(s['speedup_minutes'])}**{pref}")
         if not lines:
             lines = ["(no signups)"]
         icon = _POSITION_ICON.get(position_type, "")

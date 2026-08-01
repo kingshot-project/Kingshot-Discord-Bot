@@ -3,10 +3,61 @@ import pytest
 from cogs.kvk_util import (
     format_speedups,
     generate_time_slots,
+    parse_desired_slots,
     parse_speedups,
     rank_and_assign,
     type_dates_for,
 )
+
+
+@pytest.mark.parametrize("text,indices", [
+    ("", []),
+    ("20:00", [40]),                       # mode 0: index i -> i*30 min; 20:00 = 40
+    ("20:00-21:00", [40, 41, 42]),         # 20:00, 20:30, 21:00
+    ("20:00, 22:00", [40, 44]),
+    ("20:15", [40]),                       # off-grid single time snaps to the covering slot 20:00
+    ("20:00-21:00, 23:30", [40, 41, 42, 47]),
+    ("00:00", [0]),
+])
+def test_parse_desired_slots_ok(text, indices):
+    assert parse_desired_slots(text, 0) == indices
+
+
+@pytest.mark.parametrize("bad", ["abc", "25:00", "20:00-19:00", "20:70", "20"])
+def test_parse_desired_slots_bad(bad):
+    with pytest.raises(ValueError):
+        parse_desired_slots(bad, 0)
+
+
+def test_rank_and_assign_honors_desired():
+    signups = [
+        {"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [2]},
+        {"fid": 2, "speedup_minutes": 50, "submitted_at": "t", "desired_slots": [2]},
+    ]
+    by_slot = {r["slot_index"]: r["fid"] for r in rank_and_assign(signups, 4, 0)}
+    assert by_slot[2] == 1                  # higher speedup wins the contested slot
+    assert by_slot[0] == 2                  # loser falls back to the first free slot
+    assert by_slot[1] is None and by_slot[3] is None
+
+
+def test_rank_and_assign_no_desired_is_sequential():
+    signups = [
+        {"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": []},
+        {"fid": 2, "speedup_minutes": 50, "submitted_at": "t"},   # missing key = no preference
+    ]
+    assert [r["fid"] for r in rank_and_assign(signups, 3, 0)] == [1, 2, None]
+
+
+def test_rank_and_assign_desired_out_of_range_falls_back():
+    signups = [{"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [99]}]
+    assert rank_and_assign(signups, 3, 0)[0]["fid"] == 1   # index 99 >= 3 ignored -> slot 0
+
+
+def test_rank_and_assign_locked_slot_blocks_desired():
+    signups = [{"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [1]}]
+    by_slot = {r["slot_index"]: (r["fid"], r["locked"]) for r in rank_and_assign(signups, 3, 0, locked={1: 9})}
+    assert by_slot[1] == (9, 1)             # locked slot stays
+    assert by_slot[0] == (1, 0)             # desired slot taken -> fallback to slot 0
 
 
 @pytest.mark.parametrize("minutes,text", [

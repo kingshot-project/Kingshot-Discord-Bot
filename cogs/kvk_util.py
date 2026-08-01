@@ -74,22 +74,88 @@ def generate_time_slots(slot_mode: int) -> list[str]:
     return slots
 
 
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def _time_to_minutes(token: str):
+    """'HH:MM' -> minutes of day, or None if malformed or out of range."""
+    m = _TIME_RE.fullmatch(token.strip())
+    if not m:
+        return None
+    hours, mins = int(m.group(1)), int(m.group(2))
+    if hours > 23 or mins > 59:
+        return None
+    return hours * 60 + mins
+
+
+def parse_desired_slots(text: str, slot_mode: int) -> list[int]:
+    """Parse preferred times into grid slot indices for the given slot mode.
+
+    Comma-separated tokens; each is 'HH:MM' or a 'HH:MM-HH:MM' range. A range selects every grid
+    slot whose time is within [start, end]; a lone time snaps to the slot covering it (the latest
+    grid slot at or before it). Empty input -> []. Raises ValueError on a malformed token.
+    """
+    if not text or not text.strip():
+        return []
+    grid = [_time_to_minutes(t) for t in generate_time_slots(slot_mode)]
+    wanted: set = set()
+    for raw in text.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_s, end_s = token.split("-", 1)
+            start, end = _time_to_minutes(start_s), _time_to_minutes(end_s)
+            if start is None or end is None or start > end:
+                raise ValueError(f"bad time range: {token!r}")
+            wanted.update(i for i, m in enumerate(grid) if start <= m <= end)
+        else:
+            point = _time_to_minutes(token)
+            if point is None:
+                raise ValueError(f"bad time: {token!r}")
+            covering = [i for i, m in enumerate(grid) if m <= point]
+            wanted.add(covering[-1] if covering else 0)
+    return sorted(wanted)
+
+
 def rank_and_assign(signups, slot_count, slot_mode, locked=None):
-    """Rank signups by speedups and place them into slot_count slots (see module docstring)."""
+    """Rank signups by speedups, honor each player's desired slots, then fill the rest by rank.
+
+    Each signup may carry "desired_slots" (a list of slot indices). In rank order a player is placed
+    in their first free desired slot; players with no free desired slot fill the remaining slots by
+    index order. Locked slots (locked={index: fid}) are pre-placed and never reassigned. With no
+    desired slots this reduces to the old behavior: rank order fills slots by index.
+    """
     locked = dict(locked or {})
     times = generate_time_slots(slot_mode)
     ranked = sorted(signups, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
-    locked_fids = set(locked.values())
-    pool = [s["fid"] for s in ranked if s["fid"] not in locked_fids]
-    result = []
-    pi = 0
-    for i in range(slot_count):
-        slot_time = times[i] if i < len(times) else ""
-        if i in locked:
-            result.append({"slot_index": i, "slot_time": slot_time, "fid": locked[i], "locked": 1})
-        elif pi < len(pool):
-            result.append({"slot_index": i, "slot_time": slot_time, "fid": pool[pi], "locked": 0})
-            pi += 1
-        else:
-            result.append({"slot_index": i, "slot_time": slot_time, "fid": None, "locked": 0})
-    return result
+
+    assigned = dict(locked)              # slot_index -> fid
+    taken_fids = set(locked.values())
+    leftover = []                        # ranked fids not placed by preference
+    for s in ranked:
+        fid = s["fid"]
+        if fid in taken_fids:
+            continue                     # already holds a locked slot
+        placed = False
+        for i in s.get("desired_slots", []):
+            if 0 <= i < slot_count and i not in assigned:
+                assigned[i] = fid
+                taken_fids.add(fid)
+                placed = True
+                break
+        if not placed:
+            leftover.append(fid)
+
+    free = (i for i in range(slot_count) if i not in assigned)
+    for fid in leftover:
+        i = next(free, None)
+        if i is None:
+            break                        # more players than slots
+        assigned[i] = fid
+
+    return [
+        {"slot_index": i, "slot_time": times[i] if i < len(times) else "",
+         "fid": assigned.get(i), "locked": 1 if i in locked else 0}
+        for i in range(slot_count)
+    ]

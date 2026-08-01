@@ -33,7 +33,22 @@ def test_signup_upsert_idempotent():
     )
     kvk.upsert_signup(c, eid, 100, "Training", 600, 100, "t1")
     kvk.upsert_signup(c, eid, 100, "Training", 900, 100, "t2")
-    assert kvk.get_signups(c, eid, "Training") == [{"fid": 100, "speedup_minutes": 900, "submitted_at": "t2"}]
+    assert kvk.get_signups(c, eid, "Training") == [
+        {"fid": 100, "speedup_minutes": 900, "submitted_at": "t2", "desired_slots": []}]
+
+
+def test_desired_slots_roundtrip_and_preserved_on_reupsert():
+    c = _conn()
+    eid = kvk.create_event(
+        c, guild_id=1, name="D", event_date="d", scope="kingdom", slots_per_alliance=None, slot_mode=0,
+        signup_open_at="a", signup_close_at="b", publish_channel_id=None, created_by=1, created_at="c")
+    kvk.upsert_signup(c, eid, 100, "Training", 600, 100, "t1")
+    kvk.set_desired_slots(c, eid, 100, "Training", "40,41,42")
+    assert kvk.get_signups(c, eid, "Training")[0]["desired_slots"] == [40, 41, 42]
+    # Re-entering speedups must NOT wipe the preferred slots
+    kvk.upsert_signup(c, eid, 100, "Training", 900, 100, "t2")
+    got = kvk.get_signups(c, eid, "Training")[0]
+    assert got["speedup_minutes"] == 900 and got["desired_slots"] == [40, 41, 42]
 
 
 def test_list_events_scoped_to_guild_newest_first():
@@ -109,7 +124,8 @@ def test_delete_event_removes_all_related_rows():
     # the other event is untouched
     assert kvk.get_event(c, keep)["name"] == "Keep"
     assert kvk.get_active_types(c, keep) == ["Training"]
-    assert kvk.get_signups(c, keep, "Training") == [{"fid": 1, "speedup_minutes": 10, "submitted_at": "t"}]
+    assert kvk.get_signups(c, keep, "Training") == [
+        {"fid": 1, "speedup_minutes": 10, "submitted_at": "t", "desired_slots": []}]
 
 
 def test_slots_save_override_and_locks():

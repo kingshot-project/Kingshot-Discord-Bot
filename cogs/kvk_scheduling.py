@@ -9,7 +9,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import kvk_data as kvkdb
-from .kvk_util import POSITION_TYPES, format_speedups, generate_time_slots, parse_speedups, type_dates_for
+from .kvk_util import (
+    POSITION_TYPES,
+    format_speedups,
+    generate_time_slots,
+    parse_desired_slots,
+    parse_speedups,
+    type_dates_for,
+)
 from .permission_handler import PermissionManager
 from .pimp_my_bot import check_interaction_user, safe_edit_message, theme
 
@@ -545,6 +552,73 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             color=discord.Color.green())
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
+        embed.set_footer(text="Optional: add preferred times to influence which slots you get.")
+        await interaction.response.send_message(
+            embed=embed,
+            view=_PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys())),
+            ephemeral=True)
+
+
+class _PreferredTimesEntryView(discord.ui.View):
+    """After a signup is saved, offers an optional step to add preferred times."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str]):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.position_types = position_types
+        button = discord.ui.Button(
+            label="Add preferred times", emoji=theme.timeIcon, style=discord.ButtonStyle.primary)
+        button.callback = self.add_times
+        self.add_item(button)
+
+    async def add_times(self, interaction: discord.Interaction):
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        if ev is None:
+            await interaction.response.send_message("This event no longer exists.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            _PreferredTimesModal(self.cog, self.event_id, self.fid, self.position_types, ev["slot_mode"]))
+
+
+class _PreferredTimesModal(discord.ui.Modal, title="KvK Preferred Times"):
+    """Optional: one preferred-times field per type (free text, e.g. '20:00-22:00, 23:30'). Auto-assign
+    tries to give higher-speedup players their preferred slots first."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str], slot_mode: int):
+        super().__init__()
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.slot_mode = slot_mode
+        self.time_inputs: dict[str, discord.ui.TextInput] = {}
+        for position_type in position_types:
+            text_input = discord.ui.TextInput(
+                label=f"{position_type} times", required=False, max_length=100,
+                placeholder="e.g. 20:00-22:00, 23:30 (blank = any slot)")
+            self.time_inputs[position_type] = text_input
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        parsed: dict[str, list[int]] = {}
+        for position_type, text_input in self.time_inputs.items():
+            try:
+                parsed[position_type] = parse_desired_slots(text_input.value, self.slot_mode)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Could not read the {position_type} times. Use a format like '20:00-22:00, 23:30'.",
+                    ephemeral=True)
+                return
+        for position_type, indices in parsed.items():
+            kvkdb.set_desired_slots(
+                self.cog.conn, self.event_id, self.fid, position_type, ",".join(str(i) for i in indices))
+
+        times = generate_time_slots(self.slot_mode)
+        embed = discord.Embed(title=f"{theme.verifiedIcon} Preferred times saved", color=discord.Color.green())
+        for position_type, indices in parsed.items():
+            picks = [times[i] for i in indices if i < len(times)]
+            embed.add_field(name=position_type, value=", ".join(picks) if picks else "(any slot)", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

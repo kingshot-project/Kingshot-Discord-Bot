@@ -1,4 +1,5 @@
 """Pure sqlite data layer for db/kvk.sqlite (no discord import - unit-testable)."""
+import contextlib
 import sqlite3
 
 _EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
@@ -25,6 +26,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS kvk_signups (
             event_id INTEGER NOT NULL, fid INTEGER NOT NULL, position_type TEXT NOT NULL,
             speedup_minutes INTEGER NOT NULL, submitted_by INTEGER NOT NULL, submitted_at TEXT NOT NULL,
+            desired_slots TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (event_id, fid, position_type)
         );
         CREATE TABLE IF NOT EXISTS kvk_slots (
@@ -35,6 +37,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Additive migration for databases created before desired_slots existed.
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("ALTER TABLE kvk_signups ADD COLUMN desired_slots TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -116,20 +121,38 @@ def delete_event(conn, event_id) -> None:
 
 
 def upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at) -> None:
+    # ON CONFLICT keeps any desired_slots already set, so re-entering speedups does not wipe them.
     conn.execute(
-        """INSERT OR REPLACE INTO kvk_signups
-           (event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO kvk_signups
+           (event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at, desired_slots)
+           VALUES (?, ?, ?, ?, ?, ?, '')
+           ON CONFLICT(event_id, fid, position_type) DO UPDATE SET
+             speedup_minutes = excluded.speedup_minutes,
+             submitted_by = excluded.submitted_by,
+             submitted_at = excluded.submitted_at""",
         (event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at),
     )
     conn.commit()
 
 
+def set_desired_slots(conn, event_id, fid, position_type, csv) -> None:
+    """Store a signup's preferred slot indices as a comma-separated string ('' = no preference)."""
+    conn.execute(
+        "UPDATE kvk_signups SET desired_slots = ? WHERE event_id = ? AND fid = ? AND position_type = ?",
+        (csv, event_id, fid, position_type))
+    conn.commit()
+
+
+def _parse_slot_csv(csv):
+    return [int(x) for x in csv.split(",") if x.strip()] if csv else []
+
+
 def get_signups(conn, event_id, position_type):
     rows = conn.execute(
-        "SELECT fid, speedup_minutes, submitted_at FROM kvk_signups WHERE event_id = ? AND position_type = ?",
-        (event_id, position_type)).fetchall()
-    return [{"fid": r[0], "speedup_minutes": r[1], "submitted_at": r[2]} for r in rows]
+        "SELECT fid, speedup_minutes, submitted_at, desired_slots FROM kvk_signups "
+        "WHERE event_id = ? AND position_type = ?", (event_id, position_type)).fetchall()
+    return [{"fid": r[0], "speedup_minutes": r[1], "submitted_at": r[2],
+             "desired_slots": _parse_slot_csv(r[3])} for r in rows]
 
 
 def get_signup_minutes(conn, event_id):

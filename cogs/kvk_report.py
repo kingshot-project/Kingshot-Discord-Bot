@@ -15,6 +15,9 @@ _MAX_FIELDS_PER_EMBED = 25  # Discord's hard field-count cap per embed
 _MAX_EMBEDS_PER_MESSAGE = 10
 _MAX_GROUP_OPTIONS = 25
 _LOCK_MARK = "[LOCKED]"
+_LAYOUT_CHILD_CAP = 34   # keep each LayoutView under Discord's 40-children limit (container + its items)
+_TEXT_CHUNK = 3900       # keep each TextDisplay under Discord's per-message text budget
+_TYPE_COLOURS = [discord.Color.blurple(), discord.Color.green(), discord.Color.gold()]
 
 
 def _alliance_of(fid: int):
@@ -154,6 +157,81 @@ def _type_embeds(ev: dict, position_type: str, rows: list, minutes_map: dict, ni
     return embeds
 
 
+class _ScheduleLayout(discord.ui.LayoutView):
+    """A single Components-v2 message: one accent-coloured container of schedule text."""
+
+    def __init__(self, container: discord.ui.Container):
+        super().__init__(timeout=None)
+        self.add_item(container)
+
+
+def _emit_layouts(layouts: list, title: str, blocks: list, colour) -> None:
+    """Pack a title plus text/separator blocks into one or more _ScheduleLayout messages.
+
+    Each container is capped at _LAYOUT_CHILD_CAP items so the LayoutView stays under Discord's
+    40-children limit; overflow spills into a "(cont.)" container.
+    """
+    idx = 0
+    part = 0
+    while True:
+        header = title if part == 0 else f"{title} (cont.)"
+        children = [discord.ui.TextDisplay(header)]
+        while idx < len(blocks) and len(children) < _LAYOUT_CHILD_CAP:
+            children.append(blocks[idx])
+            idx += 1
+        layouts.append(_ScheduleLayout(discord.ui.Container(*children, accent_colour=colour)))
+        part += 1
+        if idx >= len(blocks):
+            break
+
+
+def _render_layouts(conn, event_id) -> list:
+    """Build the published schedule as Components-v2 LayoutViews (one or more messages).
+
+    One accent colour per position type; kingdom scope is one text block, alliance scope is one
+    block per alliance separated by a divider. Skipped signups get a final orange note.
+    """
+    ev = kvkdb.get_event(conn, event_id)
+    if ev is None:
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(f"No event with id {event_id}."), accent_colour=discord.Color.red())
+        return [_ScheduleLayout(container)]
+
+    minutes_map = kvkdb.get_signup_minutes(conn, event_id)
+    slots = kvkdb.get_slots(conn, event_id)
+    nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
+    by_type: dict = {}
+    for row in slots:
+        by_type.setdefault(row["position_type"], []).append(row)
+
+    layouts: list = []
+    for i, position_type in enumerate(kvkdb.get_active_types(conn, event_id)):
+        colour = _TYPE_COLOURS[i % len(_TYPE_COLOURS)]
+        rows = by_type.get(position_type, [])
+        blocks: list = []
+        if ev["scope"] == "kingdom":
+            lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in rows]
+            blocks.extend(discord.ui.TextDisplay(chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
+        else:
+            by_alliance: dict = {}
+            for r in rows:
+                by_alliance.setdefault(r["alliance_id"], []).append(r)
+            for pos, aid in enumerate(sorted(by_alliance)):
+                if pos:  # a divider before every alliance after the first
+                    blocks.append(discord.ui.Separator())
+                lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in by_alliance[aid]]
+                chunks = _chunk_lines(lines, _TEXT_CHUNK)
+                blocks.append(discord.ui.TextDisplay(f"**Alliance {aid}**\n{chunks[0]}"))
+                blocks.extend(discord.ui.TextDisplay(chunk) for chunk in chunks[1:])
+        _emit_layouts(layouts, f"## {ev['name']} - {position_type}", blocks, colour)
+
+    skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
+    if skipped:
+        blocks = [discord.ui.TextDisplay(chunk) for chunk in _chunk_lines([str(f) for f in skipped], _TEXT_CHUNK)]
+        _emit_layouts(layouts, "## Report notes - Skipped (no alliance)", blocks, discord.Color.orange())
+    return layouts
+
+
 class KvkReport(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -257,8 +335,8 @@ class KvkReport(commands.Cog):
             except (discord.Forbidden, discord.NotFound):
                 await interaction.followup.send("Publish channel not found.", ephemeral=True)
                 return
-        for embed in self._render_embeds(conn, event_id):
-            await channel.send(embed=embed)
+        for layout in _render_layouts(conn, event_id):
+            await channel.send(view=layout)
         kvkdb.set_status(conn, event_id, "published")
         await interaction.followup.send("Published.", ephemeral=True)
 

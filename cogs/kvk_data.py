@@ -64,6 +64,14 @@ def get_active_types(conn, event_id):
     return [r[0] for r in rows]
 
 
+def get_event_type_dates(conn, event_id):
+    """(position_type, type_date) pairs for an event, ordered by date. For the menu event details."""
+    rows = conn.execute(
+        "SELECT position_type, type_date FROM kvk_event_types WHERE event_id = ? ORDER BY type_date, position_type",
+        (event_id,)).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def get_event(conn, event_id):
     row = conn.execute("SELECT * FROM kvk_events WHERE id = ?", (event_id,)).fetchone()
     return dict(zip(_EVENT_COLS, row, strict=True)) if row else None

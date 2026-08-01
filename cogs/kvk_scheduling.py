@@ -620,6 +620,11 @@ class _KvkMenuView(discord.ui.View):
             edit_button.callback = self.edit_signup
             self.add_item(edit_button)
 
+        back_button = discord.ui.Button(
+            label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=2)
+        back_button.callback = self.back
+        self.add_item(back_button)
+
     @property
     def truncated(self) -> bool:
         return len(self.events) > _MAX_EVENT_OPTIONS
@@ -632,10 +637,7 @@ class _KvkMenuView(discord.ui.View):
             f"{theme.editListIcon} **Edit a Signup** - fix one player's speedups",
         ])
         if self.selected_event_id is not None:
-            name = next(
-                (e["name"] for e in self.events if e["id"] == self.selected_event_id),
-                str(self.selected_event_id))
-            selected = f"Selected event: **{name}** (id {self.selected_event_id})"
+            selected = self._event_detail()
         elif self.events:
             selected = "Pick an event from the dropdown, then use Report / Publish / Edit."
         else:
@@ -650,6 +652,29 @@ class _KvkMenuView(discord.ui.View):
         return discord.Embed(
             title=f"{theme.crossIcon} KvK Scheduling", description=description, color=discord.Color.blue())
 
+    def _event_detail(self) -> str:
+        """Full details of the selected event for the menu embed: dates, scope, window, types, counts."""
+        ev = kvkdb.get_event(self.cog.conn, self.selected_event_id)
+        if ev is None:
+            return f"Selected event {self.selected_event_id} is gone. Pick another."
+        counts: dict = {}
+        for _fid, ptype in kvkdb.get_signup_minutes(self.cog.conn, self.selected_event_id):
+            counts[ptype] = counts.get(ptype, 0) + 1
+        type_dates = kvkdb.get_event_type_dates(self.cog.conn, self.selected_event_id)
+        type_lines = "\n".join(
+            f"  {t}: {d} ({counts.get(t, 0)} signups)" for t, d in type_dates) or "  (none)"
+        n_text = str(ev["slots_per_alliance"]) if ev["scope"] == "alliance" else "n/a (kingdom)"
+        channel = f"<#{ev['publish_channel_id']}>" if ev["publish_channel_id"] else "(none)"
+        icon = _status_icon(ev["status"]) or ""
+        return (
+            f"Selected: **{ev['name']}** (id {ev['id']}) {icon} {ev['status']}\n"
+            f"Event date: {ev['event_date']}  |  Scope: {ev['scope']}  |  Slots/alliance: {n_text}\n"
+            f"Slot mode: {ev['slot_mode']} ({_SLOT_MODE_HINT.get(ev['slot_mode'], '')})\n"
+            f"Signup (UTC): {ev['signup_open_at']} to {ev['signup_close_at']}\n"
+            f"Publish channel: {channel}\n"
+            f"Types:\n{type_lines}"
+        )
+
     async def _require_event(self, interaction: discord.Interaction) -> bool:
         if self.selected_event_id is None:
             await interaction.response.send_message("Pick an event first.", ephemeral=True)
@@ -658,6 +683,14 @@ class _KvkMenuView(discord.ui.View):
 
     def _report_cog(self):
         return self.cog.bot.get_cog("KvkReport")
+
+    async def back(self, interaction: discord.Interaction):
+        main_menu_cog = self.cog.bot.get_cog("MainMenu")
+        if main_menu_cog:
+            await main_menu_cog.show_main_menu(interaction)
+        else:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} Main Menu module not found.", ephemeral=True)
 
     async def create(self, interaction: discord.Interaction):
         await self.cog.launch_create(interaction)

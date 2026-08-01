@@ -16,7 +16,8 @@ _MAX_EMBEDS_PER_MESSAGE = 10
 _MAX_GROUP_OPTIONS = 25
 _LOCK_MARK = "[LOCKED]"
 _LAYOUT_CHILD_CAP = 34   # keep each LayoutView under Discord's 40-children limit (container + its items)
-_TEXT_CHUNK = 3900       # keep each TextDisplay under Discord's per-message text budget
+_TEXT_CHUNK = 3500       # max chars per TextDisplay; leaves room for the header under the message budget
+_MSG_CHAR_BUDGET = 3800  # Discord caps a Components-v2 message at 4000 display chars across all text
 _TYPE_COLOURS = [discord.Color.blurple(), discord.Color.green(), discord.Color.gold()]
 
 
@@ -166,18 +167,28 @@ class _ScheduleLayout(discord.ui.LayoutView):
 
 
 def _emit_layouts(layouts: list, title: str, blocks: list, colour) -> None:
-    """Pack a title plus text/separator blocks into one or more _ScheduleLayout messages.
+    """Pack a title plus blocks into one or more _ScheduleLayout messages.
 
-    Each container is capped at _LAYOUT_CHILD_CAP items so the LayoutView stays under Discord's
-    40-children limit; overflow spills into a "(cont.)" container.
+    blocks are ("text", str) or ("sep", "") pairs. Each message stays under BOTH Discord's
+    40-children limit (via _LAYOUT_CHILD_CAP) and its 4000-char text budget (via _MSG_CHAR_BUDGET,
+    which discord.py does not enforce); overflow spills into a "(cont.)" message.
     """
     idx = 0
     part = 0
     while True:
         header = title if part == 0 else f"{title} (cont.)"
         children = [discord.ui.TextDisplay(header)]
+        used = len(header)
         while idx < len(blocks) and len(children) < _LAYOUT_CHILD_CAP:
-            children.append(blocks[idx])
+            kind, text = blocks[idx]
+            if kind == "sep" and len(children) == 1:
+                idx += 1  # drop a divider that would lead a fresh message
+                continue
+            # Always place at least one real block (len(children) == 1), else respect the char budget.
+            if len(children) > 1 and used + len(text) > _MSG_CHAR_BUDGET:
+                break
+            children.append(discord.ui.Separator() if kind == "sep" else discord.ui.TextDisplay(text))
+            used += len(text)
             idx += 1
         layouts.append(_ScheduleLayout(discord.ui.Container(*children, accent_colour=colour)))
         part += 1
@@ -211,23 +222,23 @@ def _render_layouts(conn, event_id) -> list:
         blocks: list = []
         if ev["scope"] == "kingdom":
             lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in rows]
-            blocks.extend(discord.ui.TextDisplay(chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
+            blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
         else:
             by_alliance: dict = {}
             for r in rows:
                 by_alliance.setdefault(r["alliance_id"], []).append(r)
             for pos, aid in enumerate(sorted(by_alliance)):
                 if pos:  # a divider before every alliance after the first
-                    blocks.append(discord.ui.Separator())
+                    blocks.append(("sep", ""))
                 lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in by_alliance[aid]]
                 chunks = _chunk_lines(lines, _TEXT_CHUNK)
-                blocks.append(discord.ui.TextDisplay(f"**Alliance {aid}**\n{chunks[0]}"))
-                blocks.extend(discord.ui.TextDisplay(chunk) for chunk in chunks[1:])
+                blocks.append(("text", f"**Alliance {aid}**\n{chunks[0]}"))
+                blocks.extend(("text", chunk) for chunk in chunks[1:])
         _emit_layouts(layouts, f"## {ev['name']} - {position_type}", blocks, colour)
 
     skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
     if skipped:
-        blocks = [discord.ui.TextDisplay(chunk) for chunk in _chunk_lines([str(f) for f in skipped], _TEXT_CHUNK)]
+        blocks = [("text", chunk) for chunk in _chunk_lines([str(f) for f in skipped], _TEXT_CHUNK)]
         _emit_layouts(layouts, "## Report notes - Skipped (no alliance)", blocks, discord.Color.orange())
     return layouts
 

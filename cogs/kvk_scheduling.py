@@ -72,21 +72,31 @@ class KvkScheduling(commands.Cog):
         if not self._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
-        await self._start_signup(interaction, event_id, fid)
+        await self._start_signup(interaction, event_id, fid, admin_override=True)
 
     async def _start_signup(
-        self, interaction: discord.Interaction, event_id: int, fid: int, *, edit: bool = False
+        self, interaction: discord.Interaction, event_id: int, fid: int, *,
+        edit: bool = False, admin_override: bool = False,
     ) -> None:
-        """Validate the event and signup window, then show the position-type picker."""
+        """Validate the event and signup window, then show the position-type picker.
+
+        admin_override skips the status and signup-window checks, so an admin can
+        repair a signup after /kvk_report has moved the event past "collecting".
+        """
         ev = kvkdb.get_event(self.conn, event_id)
-        if ev is None or ev["status"] != "collecting":
+        if ev is None:
             await self._send_or_edit(interaction, f"Event {event_id} is not open for signup.", edit=edit)
             return
 
-        now = datetime.now(UTC).strftime(DT_FMT)
-        if not (ev["signup_open_at"] <= now <= ev["signup_close_at"]):
-            await self._send_or_edit(interaction, "The signup window for this event is closed.", edit=edit)
-            return
+        if not admin_override:
+            if ev["status"] != "collecting":
+                await self._send_or_edit(interaction, f"Event {event_id} is not open for signup.", edit=edit)
+                return
+
+            now = datetime.now(UTC).strftime(DT_FMT)
+            if not (ev["signup_open_at"] <= now <= ev["signup_close_at"]):
+                await self._send_or_edit(interaction, "The signup window for this event is closed.", edit=edit)
+                return
 
         active_types = kvkdb.get_active_types(self.conn, event_id)
         if not active_types:

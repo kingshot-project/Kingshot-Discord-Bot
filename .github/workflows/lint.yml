@@ -21,9 +21,9 @@ jobs:
         run: pip install ruff==0.15.7
 
       # Legacy code is grandfathered (see .ruff_baseline.txt). We lint ONLY the
-      # Python files changed in this PR, so new and modified code must pass while
-      # untouched legacy files are ignored.
-      - name: Lint changed Python files
+      # lines added or changed in this PR, so new and modified code must pass
+      # while untouched lines in legacy files are ignored.
+      - name: Lint changed Python lines
         run: |
           set -euo pipefail
           base_ref="${{ github.base_ref }}"
@@ -34,4 +34,4 @@ jobs:
             exit 0
           fi
           printf 'Linting changed files:\n%s\n\n' "${files[*]}"
-          ruff check "${files[@]}"
+          python3 .github/scripts/ruff_changed_lines.py "origin/$base_ref" "${files[@]}"

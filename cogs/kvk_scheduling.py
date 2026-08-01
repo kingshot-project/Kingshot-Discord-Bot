@@ -552,11 +552,13 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             color=discord.Color.green())
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
-        embed.set_footer(text="Optional: add preferred times to influence which slots you get.")
-        await interaction.response.send_message(
-            embed=embed,
-            view=_PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys())),
-            ephemeral=True)
+        # Preferred times only make sense for kingdom scope (full-day grid); alliance slots are
+        # the first N times of the grid, so a preference there could not be honored.
+        view = None
+        if ev and ev["scope"] == "kingdom":
+            embed.set_footer(text="Optional: add preferred times to say which slots you want.")
+            view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys()))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class _PreferredTimesEntryView(discord.ui.View):

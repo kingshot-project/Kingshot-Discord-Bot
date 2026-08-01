@@ -170,7 +170,7 @@ def _fmt_desired(indices, times) -> str:
         return ""
     if len(picks) <= 4:
         return " - wants " + ", ".join(picks)
-    return f" - wants {picks[0]}-{picks[-1]} ({len(picks)} slots)"
+    return f" - wants {len(picks)} slots ({picks[0]} to {picks[-1]})"
 
 
 def _signups_embeds(conn, event_id) -> list:

@@ -1,5 +1,4 @@
 """Pure sqlite data layer for db/kvk.sqlite (no discord import - unit-testable)."""
-import contextlib
 import sqlite3
 
 _EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
@@ -38,7 +37,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         """
     )
     # Additive migration for databases created before desired_slots existed.
-    with contextlib.suppress(sqlite3.OperationalError):
+    have = {r[1] for r in conn.execute("PRAGMA table_info(kvk_signups)").fetchall()}
+    if "desired_slots" not in have:
         conn.execute("ALTER TABLE kvk_signups ADD COLUMN desired_slots TEXT NOT NULL DEFAULT ''")
     conn.commit()
 

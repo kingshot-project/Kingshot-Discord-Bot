@@ -119,7 +119,7 @@ class MainMenu(commands.Cog):
                 f"{theme.ministerIcon} **Minister Scheduling**\n"
                 f"└ Manage state minister appointments\n\n"
                 f"{theme.crossIcon} **KvK Scheduling**\n"
-                f"└ Rank speedups and assign minister slots for KvK\n\n"
+                f"└ Rank speedups and assign KvK time slots\n\n"
                 f"{theme.paletteIcon} **Themes**\n"
                 f"└ Customize bot icons and colors\n\n"
                 f"{theme.lockIcon} **Permissions**\n"

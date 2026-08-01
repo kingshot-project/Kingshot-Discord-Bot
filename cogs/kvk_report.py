@@ -226,7 +226,8 @@ class KvkReport(commands.Cog):
         """
         ev = kvkdb.get_event(conn, event_id)
         if not ev or ev["status"] not in ("assigned", "published"):
-            await interaction.response.send_message("Assign the schedule first (Report).", ephemeral=True)
+            await interaction.response.send_message(
+                "Run /kvk_report (or the Report / Assign button) first.", ephemeral=True)
             return
         if not ev["publish_channel_id"]:
             await interaction.response.send_message("No publish channel set.", ephemeral=True)

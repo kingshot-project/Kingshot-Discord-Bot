@@ -11,7 +11,7 @@ from discord.ext import commands
 from . import kvk_data as kvkdb
 from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups
 from .permission_handler import PermissionManager
-from .pimp_my_bot import safe_edit_message, theme
+from .pimp_my_bot import check_interaction_user, safe_edit_message, theme
 
 DB_PATH = "db/kvk.sqlite"
 DATE_FMT = "%Y-%m-%d"
@@ -64,7 +64,7 @@ class KvkScheduling(commands.Cog):
             await interaction.response.send_message(
                 f"{theme.deniedIcon} KvK Scheduling is Global Admin only.", ephemeral=True)
             return
-        view = _KvkMenuView(self, interaction.guild_id)
+        view = _KvkMenuView(self, interaction.guild_id, interaction.user.id)
         await safe_edit_message(interaction, embed=view.build_embed(), view=view, content=None)
 
     @app_commands.command(name="kvk_signup", description="Sign up for a KvK event (any registered player).")
@@ -509,6 +509,7 @@ class _KvkEventSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.menu_view.selected_event_id = int(self.values[0])
+        self.menu_view._build_items()  # rebuild so the dropdown shows the pick and any new events
         await safe_edit_message(interaction, embed=self.menu_view.build_embed(), view=self.menu_view)
 
 
@@ -534,13 +535,25 @@ class _EditSignupModal(discord.ui.Modal, title="Edit a KvK Signup"):
 class _KvkMenuView(discord.ui.View):
     """The /settings KvK sub-menu: pick an event, then create, report, publish, or edit signups."""
 
-    def __init__(self, cog: KvkScheduling, guild_id: int):
+    def __init__(self, cog: KvkScheduling, guild_id: int, viewer_id: int):
         super().__init__(timeout=VIEW_TIMEOUT)
         self.cog = cog
         self.guild_id = guild_id
+        self.viewer_id = viewer_id
         self.selected_event_id: int | None = None
         self.events: list = []
         self._build_items()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Lock the menu to the admin who opened it. The /settings message is public, so without
+        this any member could click the buttons; the edit path in particular has no other admin gate."""
+        if not await check_interaction_user(interaction, self.viewer_id):
+            return False
+        if not self.cog._is_global_admin(interaction):
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Scheduling is Global Admin only.", ephemeral=True)
+            return False
+        return True
 
     def _build_items(self) -> None:
         """(Re)build the components from the current event set. The event select and the actions

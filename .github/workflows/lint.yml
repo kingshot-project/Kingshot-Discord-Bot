@@ -1,0 +1,37 @@
+name: Lint (ruff)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ruff-changed:
+    name: Ruff on changed files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.15.7
+
+      # Legacy code is grandfathered (see .ruff_baseline.txt). We lint ONLY the
+      # Python files changed in this PR, so new and modified code must pass while
+      # untouched legacy files are ignored.
+      - name: Lint changed Python files
+        run: |
+          set -euo pipefail
+          base_ref="${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "$base_ref"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "origin/$base_ref...HEAD" -- '*.py')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No changed Python files — nothing to lint."
+            exit 0
+          fi
+          printf 'Linting changed files:\n%s\n\n' "${files[*]}"
+          ruff check "${files[@]}"

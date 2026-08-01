@@ -1,0 +1,61 @@
+# Ruff baseline — frozen legacy debt as of 2026-08-01 (ruff 0.15.7)
+# Existing violations below are grandfathered. CI (.github/workflows/lint.yml)
+# lints ONLY changed .py files, so new/changed code must pass; this snapshot is
+# the reference for incremental cleanup. Regenerate: ruff check . --statistics
+#
+# Total fixable: 1117 (ruff check --fix). Counts by rule:
+
+702	E501  	[ ] line-too-long
+622	W293  	[-] blank-line-with-whitespace
+ 91	UP045 	[*] non-pep604-annotation-optional
+ 88	W291  	[-] trailing-whitespace
+ 76	I001  	[*] unsorted-imports
+ 75	SIM105	[ ] suppressible-exception
+ 69	RUF001	[ ] ambiguous-unicode-character-string
+ 64	RUF013	[ ] implicit-optional
+ 60	F541  	[*] f-string-missing-placeholders
+ 51	RUF010	[*] explicit-f-string-type-conversion
+ 50	RUF059	[ ] unused-unpacked-variable
+ 48	UP006 	[*] non-pep585-annotation
+ 42	UP017 	[*] datetime-timezone-utc
+ 32	F841  	[-] unused-variable
+ 28	SIM108	[ ] if-else-block-instead-of-if-exp
+ 21	F401  	[-] unused-import
+ 20	W292  	[*] missing-newline-at-end-of-file
+ 17	RUF006	[ ] asyncio-dangling-task
+ 16	B007  	[ ] unused-loop-control-variable
+ 16	SIM102	[ ] collapsible-if
+ 15	UP015 	[*] redundant-open-modes
+ 13	UP035 	[-] deprecated-import
+ 12	RUF005	[ ] collection-literal-concatenation
+ 11	E701  	[ ] multiple-statements-on-one-line-colon
+ 11	RUF012	[ ] mutable-class-default
+  8	B905  	[ ] zip-without-explicit-strict
+  8	UP037 	[*] quoted-annotation
+  7	C416  	[ ] unnecessary-comprehension
+  7	UP041 	[*] timeout-error-alias
+  5	E402  	[ ] module-import-not-at-top-of-file
+  5	E741  	[ ] ambiguous-variable-name
+  5	SIM114	[*] if-with-same-arms
+  4	E702  	[ ] multiple-statements-on-one-line-semicolon
+  4	SIM117	[ ] multiple-with-statements
+  4	SIM118	[-] in-dict-keys
+  4	UP024 	[*] os-error-alias
+  3	B009  	[*] get-attr-with-constant
+  3	RUF003	[ ] ambiguous-unicode-character-comment
+  3	SIM115	[ ] open-file-with-context-handler
+  3	SIM201	[ ] negate-equal-op
+  2	B023  	[ ] function-uses-loop-variable
+  2	E712  	[ ] true-false-comparison
+  2	RUF002	[ ] ambiguous-unicode-character-docstring
+  2	RUF019	[*] unnecessary-key-check
+  2	SIM103	[ ] needless-bool
+  1	B025  	[ ] duplicate-try-block-exception
+  1	B904  	[ ] raise-without-from-inside-except
+  1	E401  	[*] multiple-imports-on-one-line
+  1	E731  	[ ] lambda-assignment
+  1	SIM113	[ ] enumerate-for-loop
+  1	SIM116	[ ] if-else-block-instead-of-dict-lookup
+  1	UP036 	[ ] outdated-version-block
+Found 2340 errors.
+[*] 1117 fixable with the `--fix` option (335 hidden fixes can be enabled with the `--unsafe-fixes` option).

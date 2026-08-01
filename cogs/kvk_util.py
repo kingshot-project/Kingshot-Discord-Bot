@@ -43,3 +43,24 @@ def generate_time_slots(slot_mode: int) -> list[str]:
                     break
                 slots.append(f"{hour:02}:{minute:02}")
     return slots
+
+
+def rank_and_assign(signups, slot_count, slot_mode, locked=None):
+    """Rank signups by speedups and place them into slot_count slots (see module docstring)."""
+    locked = dict(locked or {})
+    times = generate_time_slots(slot_mode)
+    ranked = sorted(signups, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+    locked_fids = set(locked.values())
+    pool = [s["fid"] for s in ranked if s["fid"] not in locked_fids]
+    result = []
+    pi = 0
+    for i in range(slot_count):
+        slot_time = times[i] if i < len(times) else ""
+        if i in locked:
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": locked[i], "locked": 1})
+        elif pi < len(pool):
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": pool[pi], "locked": 0})
+            pi += 1
+        else:
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": None, "locked": 0})
+    return result

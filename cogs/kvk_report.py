@@ -219,6 +219,31 @@ class KvkReport(commands.Cog):
             embeds.extend(notes_embeds)
         return embeds
 
+    async def _publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
+        """Post the rendered report to the event's publish channel and mark it published.
+
+        Shared by /kvk_publish and the _OverrideView Publish button so the flow lives in one place.
+        """
+        ev = kvkdb.get_event(conn, event_id)
+        if not ev or ev["status"] not in ("assigned", "published"):
+            await interaction.response.send_message("Run /kvk_report first.", ephemeral=True)
+            return
+        if not ev["publish_channel_id"]:
+            await interaction.response.send_message("No publish channel set.", ephemeral=True)
+            return
+        channel = self.bot.get_channel(int(ev["publish_channel_id"]))
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(int(ev["publish_channel_id"]))
+            except (discord.Forbidden, discord.NotFound):
+                await interaction.response.send_message("Publish channel not found.", ephemeral=True)
+                return
+        await interaction.response.defer(ephemeral=True)
+        for embed in self._render_embeds(conn, event_id):
+            await channel.send(embed=embed)
+        kvkdb.set_status(conn, event_id, "published")
+        await interaction.followup.send("Published.", ephemeral=True)
+
     @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
     @app_commands.describe(event_id="The KvK event ID")
     async def kvk_report(self, interaction: discord.Interaction, event_id: int):
@@ -242,6 +267,15 @@ class KvkReport(commands.Cog):
                 f"Override select shows first {_MAX_GROUP_OPTIONS} of {len(view.groups)} groups.", ephemeral=True)
         if not view.groups:
             await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
+
+    @app_commands.command(name="kvk_publish", description="Publish the KvK schedule (Global Admin only).")
+    @app_commands.describe(event_id="The KvK event ID")
+    async def kvk_publish(self, interaction: discord.Interaction, event_id: int):
+        sched = self.bot.get_cog("KvkScheduling")
+        if sched is None or not sched._is_global_admin(interaction):
+            await interaction.response.send_message("Global Admin only.", ephemeral=True)
+            return
+        await self._publish(interaction, sched.conn, event_id)
 
 
 class _GroupSelect(discord.ui.Select):
@@ -353,7 +387,7 @@ class _OverrideView(discord.ui.View):
         self.add_item(rerun_button)
 
         publish_button = discord.ui.Button(label="Publish", style=discord.ButtonStyle.success, row=2)
-        publish_button.callback = self.publish_stub
+        publish_button.callback = self.publish
         self.add_item(publish_button)
 
     @property
@@ -442,9 +476,8 @@ class _OverrideView(discord.ui.View):
         self.report_cog._compute(self.conn, self.event_id)
         await self._refresh(interaction)
 
-    async def publish_stub(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "Publish is not wired up yet. It will post the final assignments (Task 7).", ephemeral=True)
+    async def publish(self, interaction: discord.Interaction):
+        await self.report_cog._publish(interaction, self.conn, self.event_id)
 
 
 async def setup(bot):

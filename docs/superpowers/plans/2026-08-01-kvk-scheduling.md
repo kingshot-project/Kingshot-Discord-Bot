@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # tests/test_kvk_util.py
 import pytest
 
-from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign
+from cogs.kvk_util import generate_time_slots, parse_speedups
 
 
 @pytest.mark.parametrize("text,minutes", [
@@ -139,11 +139,11 @@ def generate_time_slots(slot_mode: int) -> list[str]:
     return slots
 ```
 
-(`rank_and_assign` is added in Task 2 — the Task-1 test imports it, so both land before the suite is green; run the parser/slots tests with `-k "parse or slots"` until Task 2 lands.)
+(`rank_and_assign` is added in Task 2; the Task-1 test imports only the two functions defined here, so the suite collects and passes now.)
 
-- [ ] **Step 5: Run parser/slots tests — expect PASS**
+- [ ] **Step 5: Run the tests — expect PASS**
 
-Run: `python -m pytest tests/test_kvk_util.py -q -k "parse or slots"`
+Run: `python -m pytest tests/test_kvk_util.py -q`
 
 - [ ] **Step 6: Lint & commit**
 
@@ -167,7 +167,11 @@ git commit -m "feat(kvk): speedup parser and slot grid" -m "Co-Authored-By: Clau
   - `locked`: `{slot_index: fid}` pinned and removed from the pool.
   - Returns length-`slot_count` list of `{"slot_index", "slot_time", "fid", "locked"}` (fid may be None). Sort: `speedup_minutes` DESC, `submitted_at` ASC, `fid` ASC. Locked rows carry `locked=1`; others `locked=0`.
 
-- [ ] **Step 1: Append failing tests to `tests/test_kvk_util.py`**
+- [ ] **Step 1: Add `rank_and_assign` to the import, then append failing tests to `tests/test_kvk_util.py`**
+
+First change the import line at the top of `tests/test_kvk_util.py` to:
+`from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign`
+Then append:
 
 ```python
 def _s(fid, minutes, at):

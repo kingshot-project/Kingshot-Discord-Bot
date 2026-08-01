@@ -19,7 +19,14 @@ DT_FMT = "%Y-%m-%d %H:%M"
 VIEW_TIMEOUT = 7200
 _MAX_EVENT_OPTIONS = 25  # Discord caps a select at 25 options
 # What each slot grid means, shown in the wizard so "Mode 0 / Mode 1" is not opaque.
-_SLOT_MODE_HINT = {0: "starts 00:00, on :00/:30", 1: "starts 00:15, on :15/:45"}
+# Mode 1 keeps a leading 00:00 stub (covers the 15-min carry-over), then runs on :15/:45.
+_SLOT_MODE_HINT = {0: "slots at :00 and :30", 1: "slots at :15 and :45, plus 00:00"}
+# Status marker shown next to an event in the pickers.
+_STATUS_ICON = {"collecting": theme.editListIcon, "assigned": theme.chartIcon, "published": theme.announceIcon}
+
+
+def _status_icon(status):
+    return _STATUS_ICON.get(status)
 
 
 class KvkScheduling(commands.Cog):
@@ -71,6 +78,9 @@ class KvkScheduling(commands.Cog):
 
     @app_commands.command(name="kvk_signup", description="Sign up for the open KvK event (any registered player).")
     async def kvk_signup(self, interaction: discord.Interaction):
+        if interaction.guild_id is None:
+            await interaction.response.send_message("Use this in a server, not a DM.", ephemeral=True)
+            return
         fids = self._fids_for_discord(interaction.user.id)
         if not fids:
             await interaction.response.send_message("No linked fid found. Run /register first.", ephemeral=True)
@@ -437,7 +447,9 @@ class _FidSelectView(discord.ui.View):
 class _EventSignupSelect(discord.ui.Select):
     def __init__(self, cog: KvkScheduling, events: list, fids: list[int]):
         options = [
-            discord.SelectOption(label=e["name"][:100], value=str(e["id"]), description=e["event_date"])
+            discord.SelectOption(
+                label=e["name"][:100], value=str(e["id"]), description=e["event_date"],
+                emoji=_status_icon("collecting"))
             for e in events[:_MAX_EVENT_OPTIONS]
         ]
         super().__init__(placeholder="Pick an event", options=options, min_values=1, max_values=1)
@@ -522,6 +534,7 @@ class _KvkEventSelect(discord.ui.Select):
                 label=e["name"][:100],
                 value=str(e["id"]),
                 description=f"{e['event_date']} - {e['scope']} - {e['status']}"[:100],
+                emoji=_status_icon(e["status"]),
                 default=(e["id"] == menu_view.selected_event_id),
             )
             for e in events

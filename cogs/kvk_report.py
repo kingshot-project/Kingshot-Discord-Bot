@@ -219,10 +219,10 @@ class KvkReport(commands.Cog):
             embeds.extend(notes_embeds)
         return embeds
 
-    async def _publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
-        """Post the rendered report to the event's publish channel and mark it published.
+    async def _confirm_publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
+        """Ask the admin to confirm before posting to the public channel, so a stray click cannot.
 
-        Shared by /kvk_publish and the _OverrideView Publish button so the flow lives in one place.
+        Shared by /kvk_publish, the /settings menu, and the _OverrideView Publish button.
         """
         ev = kvkdb.get_event(conn, event_id)
         if not ev or ev["status"] not in ("assigned", "published"):
@@ -232,14 +232,31 @@ class KvkReport(commands.Cog):
         if not ev["publish_channel_id"]:
             await interaction.response.send_message("No publish channel set.", ephemeral=True)
             return
+        again = " again" if ev["status"] == "published" else ""
+        await interaction.response.send_message(
+            f"Publish '{ev['name']}' to <#{ev['publish_channel_id']}>{again}? This posts publicly.",
+            view=_ConfirmPublishView(self, conn, event_id), ephemeral=True)
+
+    async def _do_publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
+        """Post the report to the publish channel and mark it published.
+
+        Called from the confirm view after it has edited (acked) the interaction, so it uses followups.
+        """
+        ev = kvkdb.get_event(conn, event_id)
+        if not ev or ev["status"] not in ("assigned", "published"):
+            await interaction.followup.send(
+                "Run /kvk_report (or the Report / Assign button) first.", ephemeral=True)
+            return
+        if not ev["publish_channel_id"]:
+            await interaction.followup.send("No publish channel set.", ephemeral=True)
+            return
         channel = self.bot.get_channel(int(ev["publish_channel_id"]))
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(int(ev["publish_channel_id"]))
             except (discord.Forbidden, discord.NotFound):
-                await interaction.response.send_message("Publish channel not found.", ephemeral=True)
+                await interaction.followup.send("Publish channel not found.", ephemeral=True)
                 return
-        await interaction.response.defer(ephemeral=True)
         for embed in self._render_embeds(conn, event_id):
             await channel.send(embed=embed)
         kvkdb.set_status(conn, event_id, "published")
@@ -274,7 +291,7 @@ class KvkReport(commands.Cog):
         if sched is None or not sched._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
-        await self._publish(interaction, sched.conn, event_id)
+        await self._confirm_publish(interaction, sched.conn, event_id)
 
     @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
     @app_commands.describe(event_id="The KvK event ID")
@@ -486,7 +503,31 @@ class _OverrideView(discord.ui.View):
         await self._refresh(interaction)
 
     async def publish(self, interaction: discord.Interaction):
-        await self.report_cog._publish(interaction, self.conn, self.event_id)
+        await self.report_cog._confirm_publish(interaction, self.conn, self.event_id)
+
+
+class _ConfirmPublishView(discord.ui.View):
+    """A Yes/Cancel gate shown before the public publish, so a stray click cannot post the schedule."""
+
+    def __init__(self, report_cog: KvkReport, conn, event_id: int):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.report_cog = report_cog
+        self.conn = conn
+        self.event_id = event_id
+        yes_button = discord.ui.Button(label="Yes, publish", style=discord.ButtonStyle.success)
+        yes_button.callback = self.confirm
+        self.add_item(yes_button)
+        cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel_button.callback = self.cancel
+        self.add_item(cancel_button)
+
+    async def confirm(self, interaction: discord.Interaction):
+        # Edit first: this acks the click and drops the buttons so a second click cannot re-post.
+        await interaction.response.edit_message(content="Publishing...", view=None)
+        await self.report_cog._do_publish(interaction, self.conn, self.event_id)
+
+    async def cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(content="Publish cancelled.", view=None)
 
 
 async def setup(bot):

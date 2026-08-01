@@ -51,3 +51,10 @@ def test_slots_save_override_and_locks():
     got = {(r["slot_index"], r["fid"], r["locked"]) for r in kvk.get_slots(c, eid)}
     assert (0, 1, 0) in got and (1, 42, 1) in got
     assert kvk.get_locks(c, eid, "Training", 5) == {1: 42}
+    # Test override: second save_slots for same (event_id, position_type, alliance_id) replaces all rows
+    kvk.save_slots(c, eid, "Training", 5, [
+        {"slot_index": 0, "slot_time": "00:00", "fid": 7, "locked": 0},
+    ])
+    got_after = [r for r in kvk.get_slots(c, eid) if r["position_type"] == "Training" and r["alliance_id"] == 5]
+    assert len(got_after) == 1
+    assert got_after[0]["fid"] == 7

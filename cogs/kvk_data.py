@@ -1,4 +1,4 @@
-"""Pure sqlite data layer for db/kvk.sqlite (no discord import — unit-testable)."""
+"""Pure sqlite data layer for db/kvk.sqlite (no discord import - unit-testable)."""
 import sqlite3
 
 _EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",

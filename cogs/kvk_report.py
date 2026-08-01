@@ -7,6 +7,11 @@ from discord.ext import commands
 
 from . import kvk_data as kvkdb
 from .kvk_util import format_speedups, generate_time_slots, rank_and_assign
+from .pimp_my_bot import theme
+
+# Position-type markers for the signups list.
+_POSITION_ICON = {
+    "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
 
 VIEW_TIMEOUT = 7200
 _FIELD_LIMIT = 1024
@@ -175,20 +180,22 @@ def _signups_embeds(conn, event_id) -> list:
         all_fids.update(s["fid"] for s in ranked)
     nicknames = _nicknames_for(all_fids)
 
-    title = f"{ev['name']} - signups"
-    cont_title = f"{title} (cont.)"
-    embeds = [discord.Embed(title=title, color=discord.Color.blue())]
-    used = len(title)
+    title = f"{theme.crossIcon} {ev['name']} - Signups"
+    cont_title = f"{ev['name']} - Signups (cont.)"
+    description = f"{len(all_fids)} player(s) signed up. Ranked by total speedups."
+    embeds = [discord.Embed(title=title, description=description, color=discord.Color.blue())]
+    used = len(title) + len(description)
     for position_type in active_types:
         signups = per_type[position_type]
         lines = []
-        for s in signups:
-            nick = nicknames.get(s["fid"], f"Unknown ({s['fid']})")
-            lines.append(f"{nick} ({s['fid']}): {format_speedups(s['speedup_minutes'])}")
+        for rank, s in enumerate(signups, 1):
+            nick = nicknames.get(s["fid"], "Unknown")  # the fid is shown separately below
+            lines.append(f"{rank}. {nick} ({s['fid']}) - **{format_speedups(s['speedup_minutes'])}**")
         if not lines:
             lines = ["(no signups)"]
+        icon = _POSITION_ICON.get(position_type, "")
         for i, chunk in enumerate(_chunk_lines(lines, _FIELD_LIMIT)):
-            name = f"{position_type} ({len(signups)})" if i == 0 else f"{position_type} (cont.)"
+            name = f"{icon} {position_type} ({len(signups)})" if i == 0 else f"{position_type} (cont.)"
             used = _add_paged_field(
                 embeds, discord.Embed(title=cont_title, color=discord.Color.blue()), used, name, chunk)
     return embeds

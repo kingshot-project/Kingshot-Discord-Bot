@@ -83,6 +83,35 @@ def test_list_open_events_filters_status_window_and_guild():
     assert events[0]["name"] == "Open" and events[0]["event_date"] == "2026-09-01"
 
 
+def test_delete_event_removes_all_related_rows():
+    c = _conn()
+    keep = kvk.create_event(
+        c, guild_id=1, name="Keep", event_date="d", scope="kingdom", slots_per_alliance=None,
+        slot_mode=0, signup_open_at="a", signup_close_at="b", publish_channel_id=None,
+        created_by=1, created_at="c")
+    kvk.set_event_types(c, keep, [("Training", "d")])
+    kvk.upsert_signup(c, keep, 1, "Training", 10, 1, "t")
+
+    doomed = kvk.create_event(
+        c, guild_id=1, name="Doomed", event_date="d", scope="kingdom", slots_per_alliance=None,
+        slot_mode=0, signup_open_at="a", signup_close_at="b", publish_channel_id=None,
+        created_by=1, created_at="c")
+    kvk.set_event_types(c, doomed, [("Training", "d"), ("Research", "d")])
+    kvk.upsert_signup(c, doomed, 99, "Training", 500, 99, "t")
+    kvk.save_slots(c, doomed, "Training", 0, [{"slot_index": 0, "slot_time": "00:00", "fid": 99, "locked": 0}])
+
+    kvk.delete_event(c, doomed)
+
+    assert kvk.get_event(c, doomed) is None
+    for table in ("kvk_event_types", "kvk_signups", "kvk_slots"):
+        n = c.execute(f"SELECT COUNT(*) FROM {table} WHERE event_id = ?", (doomed,)).fetchone()[0]
+        assert n == 0, f"{table} still has rows for the deleted event"
+    # the other event is untouched
+    assert kvk.get_event(c, keep)["name"] == "Keep"
+    assert kvk.get_active_types(c, keep) == ["Training"]
+    assert kvk.get_signups(c, keep, "Training") == [{"fid": 1, "speedup_minutes": 10, "submitted_at": "t"}]
+
+
 def test_slots_save_override_and_locks():
     c = _conn()
     eid = kvk.create_event(

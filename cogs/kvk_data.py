@@ -106,6 +106,15 @@ def set_status(conn, event_id, status) -> None:
     conn.commit()
 
 
+def delete_event(conn, event_id) -> None:
+    """Remove an event and everything tied to it: its types, signups, and slots."""
+    conn.execute("DELETE FROM kvk_slots WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM kvk_signups WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM kvk_event_types WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM kvk_events WHERE id = ?", (event_id,))
+    conn.commit()
+
+
 def upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO kvk_signups

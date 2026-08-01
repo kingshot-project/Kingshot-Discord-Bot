@@ -620,6 +620,11 @@ class _KvkMenuView(discord.ui.View):
             edit_button.callback = self.edit_signup
             self.add_item(edit_button)
 
+            delete_button = discord.ui.Button(
+                label="Delete", emoji=theme.trashIcon, style=discord.ButtonStyle.danger, row=1)
+            delete_button.callback = self.delete
+            self.add_item(delete_button)
+
         back_button = discord.ui.Button(
             label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=2)
         back_button.callback = self.back
@@ -635,45 +640,63 @@ class _KvkMenuView(discord.ui.View):
             f"{theme.chartIcon} **Report / Assign** - rank signups and place slots",
             f"{theme.announceIcon} **Publish** - post the schedule to its channel",
             f"{theme.editListIcon} **Edit a Signup** - fix one player's speedups",
+            f"{theme.trashIcon} **Delete** - remove the event and its data",
         ])
+        embed = discord.Embed(
+            title=f"{theme.crossIcon} KvK Scheduling",
+            description=f"Players sign up with `/kvk_signup`. Admin actions:\n{actions}",
+            color=discord.Color.blue())
         if self.selected_event_id is not None:
-            selected = self._event_detail()
+            self._add_event_fields(embed)
         elif self.events:
-            selected = "Pick an event from the dropdown, then use Report / Publish / Edit."
+            embed.add_field(
+                name="No event picked", value="Pick one from the dropdown, then use the buttons.", inline=False)
         else:
-            selected = "No events yet. Use Create Event to make one."
-        description = (
-            f"Players sign up with `/kvk_signup`. Admin actions:\n\n"
-            f"{actions}\n\n"
-            f"{theme.upperDivider}\n{selected}"
-        )
+            embed.add_field(name="No events yet", value="Use Create Event to make one.", inline=False)
         if self.truncated:
-            description += f"\n\nShowing the newest {_MAX_EVENT_OPTIONS} of {len(self.events)} events."
-        return discord.Embed(
-            title=f"{theme.crossIcon} KvK Scheduling", description=description, color=discord.Color.blue())
+            embed.set_footer(text=f"Showing the newest {_MAX_EVENT_OPTIONS} of {len(self.events)} events.")
+        return embed
 
-    def _event_detail(self) -> str:
-        """Full details of the selected event for the menu embed: dates, scope, window, types, counts."""
+    def _registration_status(self, ev: dict) -> str:
+        """Is signup open right now for this event? Mirrors list_open_events (status + window)."""
+        if ev["status"] != "collecting":
+            return f"{theme.deniedIcon} closed (status: {ev['status']})"
+        now = datetime.now(UTC).strftime(DT_FMT)
+        if now < ev["signup_open_at"]:
+            return f"{theme.hourglassIcon} not open yet (opens {ev['signup_open_at']} UTC)"
+        if now > ev["signup_close_at"]:
+            return f"{theme.deniedIcon} closed (ended {ev['signup_close_at']} UTC)"
+        return f"{theme.verifiedIcon} OPEN now (until {ev['signup_close_at']} UTC)"
+
+    def _add_event_fields(self, embed: discord.Embed) -> None:
+        """Structured details of the selected event, as embed fields for readability."""
         ev = kvkdb.get_event(self.cog.conn, self.selected_event_id)
         if ev is None:
-            return f"Selected event {self.selected_event_id} is gone. Pick another."
+            embed.add_field(
+                name="Event gone", value=f"Event {self.selected_event_id} no longer exists. Pick another.",
+                inline=False)
+            return
         counts: dict = {}
         for _fid, ptype in kvkdb.get_signup_minutes(self.cog.conn, self.selected_event_id):
             counts[ptype] = counts.get(ptype, 0) + 1
         type_dates = kvkdb.get_event_type_dates(self.cog.conn, self.selected_event_id)
         type_lines = "\n".join(
-            f"  {t}: {d} ({counts.get(t, 0)} signups)" for t, d in type_dates) or "  (none)"
-        n_text = str(ev["slots_per_alliance"]) if ev["scope"] == "alliance" else "n/a (kingdom)"
+            f"- {t}: {d} ({counts.get(t, 0)} signups)" for t, d in type_dates) or "(none)"
+        n_text = f"{ev['slots_per_alliance']} slots per alliance" if ev["scope"] == "alliance" else "kingdom-wide"
         channel = f"<#{ev['publish_channel_id']}>" if ev["publish_channel_id"] else "(none)"
         icon = _status_icon(ev["status"]) or ""
-        return (
-            f"Selected: **{ev['name']}** (id {ev['id']}) {icon} {ev['status']}\n"
-            f"Event date: {ev['event_date']}  |  Scope: {ev['scope']}  |  Slots/alliance: {n_text}\n"
-            f"Slot mode: {ev['slot_mode']} ({_SLOT_MODE_HINT.get(ev['slot_mode'], '')})\n"
-            f"Signup (UTC): {ev['signup_open_at']} to {ev['signup_close_at']}\n"
-            f"Publish channel: {channel}\n"
-            f"Types:\n{type_lines}"
-        )
+
+        embed.add_field(name=f"{icon} {ev['name']}", value=f"id {ev['id']} - status **{ev['status']}**", inline=False)
+        embed.add_field(name=f"{theme.calendarIcon} Event date", value=ev["event_date"], inline=True)
+        embed.add_field(name=f"{theme.globeIcon} Scope", value=f"{ev['scope']} ({n_text})", inline=True)
+        embed.add_field(
+            name="Slot mode", value=f"{ev['slot_mode']} - {_SLOT_MODE_HINT.get(ev['slot_mode'], '')}", inline=True)
+        embed.add_field(
+            name="Registration",
+            value=f"{ev['signup_open_at']} to {ev['signup_close_at']} UTC\n{self._registration_status(ev)}",
+            inline=False)
+        embed.add_field(name="Publish channel", value=channel, inline=True)
+        embed.add_field(name=f"{theme.membersIcon} Positions", value=type_lines, inline=False)
 
     async def _require_event(self, interaction: discord.Interaction) -> bool:
         if self.selected_event_id is None:
@@ -719,6 +742,47 @@ class _KvkMenuView(discord.ui.View):
         if not await self._require_event(interaction):
             return
         await interaction.response.send_modal(_EditSignupModal(self.cog, self.selected_event_id))
+
+    async def delete(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        ev = kvkdb.get_event(self.cog.conn, self.selected_event_id)
+        name = ev["name"] if ev else str(self.selected_event_id)
+        await interaction.response.edit_message(
+            content=f"Delete '{name}' (id {self.selected_event_id})? This removes its signups and slots "
+                    f"and cannot be undone.",
+            embed=None, view=_ConfirmDeleteView(self, self.selected_event_id))
+
+
+class _ConfirmDeleteView(discord.ui.View):
+    """Yes/Cancel gate before deleting an event; both paths return to the refreshed KvK menu."""
+
+    def __init__(self, menu_view: _KvkMenuView, event_id: int):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.menu_view = menu_view
+        self.event_id = event_id
+        yes_button = discord.ui.Button(label="Yes, delete", style=discord.ButtonStyle.danger)
+        yes_button.callback = self.confirm
+        self.add_item(yes_button)
+        cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel_button.callback = self.cancel
+        self.add_item(cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.menu_view.interaction_check(interaction)  # same opener + admin lock
+
+    async def confirm(self, interaction: discord.Interaction):
+        kvkdb.delete_event(self.menu_view.cog.conn, self.event_id)
+        if self.menu_view.selected_event_id == self.event_id:
+            self.menu_view.selected_event_id = None
+        self.menu_view._build_items()
+        await interaction.response.edit_message(
+            content=None, embed=self.menu_view.build_embed(), view=self.menu_view)
+
+    async def cancel(self, interaction: discord.Interaction):
+        self.menu_view._build_items()
+        await interaction.response.edit_message(
+            content=None, embed=self.menu_view.build_embed(), view=self.menu_view)
 
 
 async def setup(bot):

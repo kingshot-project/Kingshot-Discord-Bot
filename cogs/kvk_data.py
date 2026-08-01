@@ -3,7 +3,14 @@ import sqlite3
 
 _EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
                "slot_mode", "signup_open_at", "signup_close_at", "publish_channel_id",
-               "status", "created_by", "created_at")
+               "status", "created_by", "created_at", "pro_mode")
+
+
+def _add_column(conn, table, name, decl) -> None:
+    """Add a column if the table predates it. table/name/decl are internal literals, never user input."""
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if name not in have:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -16,7 +23,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             event_date TEXT NOT NULL, scope TEXT NOT NULL, slots_per_alliance INTEGER,
             slot_mode INTEGER NOT NULL DEFAULT 0, signup_open_at TEXT NOT NULL,
             signup_close_at TEXT NOT NULL, publish_channel_id INTEGER,
-            status TEXT NOT NULL DEFAULT 'collecting', created_by INTEGER NOT NULL, created_at TEXT NOT NULL
+            status TEXT NOT NULL DEFAULT 'collecting', created_by INTEGER NOT NULL, created_at TEXT NOT NULL,
+            pro_mode INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS kvk_event_types (
             event_id INTEGER NOT NULL, position_type TEXT NOT NULL, type_date TEXT NOT NULL,
@@ -26,6 +34,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             event_id INTEGER NOT NULL, fid INTEGER NOT NULL, position_type TEXT NOT NULL,
             speedup_minutes INTEGER NOT NULL, submitted_by INTEGER NOT NULL, submitted_at TEXT NOT NULL,
             desired_slots TEXT NOT NULL DEFAULT '',
+            base_level TEXT, upgrade_from INTEGER, upgrade_count INTEGER, kvk_points INTEGER,
             PRIMARY KEY (event_id, fid, position_type)
         );
         CREATE TABLE IF NOT EXISTS kvk_slots (
@@ -36,20 +45,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    # Additive migration for databases created before desired_slots existed.
-    have = {r[1] for r in conn.execute("PRAGMA table_info(kvk_signups)").fetchall()}
-    if "desired_slots" not in have:
-        conn.execute("ALTER TABLE kvk_signups ADD COLUMN desired_slots TEXT NOT NULL DEFAULT ''")
+    # Additive migrations for databases created before these columns existed.
+    _add_column(conn, "kvk_signups", "desired_slots", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "kvk_signups", "base_level", "TEXT")
+    _add_column(conn, "kvk_signups", "upgrade_from", "INTEGER")
+    _add_column(conn, "kvk_signups", "upgrade_count", "INTEGER")
+    _add_column(conn, "kvk_signups", "kvk_points", "INTEGER")
+    _add_column(conn, "kvk_events", "pro_mode", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
 def create_event(conn, **f) -> int:
     cur = conn.execute(
         """INSERT INTO kvk_events (guild_id, name, event_date, scope, slots_per_alliance, slot_mode,
-           signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?)""",
+           signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at, pro_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?)""",
         (f["guild_id"], f["name"], f["event_date"], f["scope"], f["slots_per_alliance"], f["slot_mode"],
-         f["signup_open_at"], f["signup_close_at"], f["publish_channel_id"], f["created_by"], f["created_at"]),
+         f["signup_open_at"], f["signup_close_at"], f["publish_channel_id"], f["created_by"], f["created_at"],
+         int(f.get("pro_mode", 0))),
     )
     conn.commit()
     return cur.lastrowid
@@ -147,12 +160,23 @@ def _parse_slot_csv(csv):
     return [int(x) for x in csv.split(",") if x.strip()] if csv else []
 
 
+def set_pro_training(conn, event_id, fid, base_level, upgrade_from, upgrade_count, kvk_points) -> None:
+    """Store the Pro-mode training-day inputs and computed points on an existing Training signup."""
+    conn.execute(
+        "UPDATE kvk_signups SET base_level = ?, upgrade_from = ?, upgrade_count = ?, kvk_points = ? "
+        "WHERE event_id = ? AND fid = ? AND position_type = 'Training'",
+        (base_level, upgrade_from, upgrade_count, kvk_points, event_id, fid))
+    conn.commit()
+
+
 def get_signups(conn, event_id, position_type):
     rows = conn.execute(
-        "SELECT fid, speedup_minutes, submitted_at, desired_slots FROM kvk_signups "
-        "WHERE event_id = ? AND position_type = ?", (event_id, position_type)).fetchall()
+        "SELECT fid, speedup_minutes, submitted_at, desired_slots, base_level, upgrade_from, "
+        "upgrade_count, kvk_points FROM kvk_signups WHERE event_id = ? AND position_type = ?",
+        (event_id, position_type)).fetchall()
     return [{"fid": r[0], "speedup_minutes": r[1], "submitted_at": r[2],
-             "desired_slots": _parse_slot_csv(r[3])} for r in rows]
+             "desired_slots": _parse_slot_csv(r[3]), "base_level": r[4], "upgrade_from": r[5],
+             "upgrade_count": r[6], "kvk_points": r[7]} for r in rows]
 
 
 def get_signup_minutes(conn, event_id):

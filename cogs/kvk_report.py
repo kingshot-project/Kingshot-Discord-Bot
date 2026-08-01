@@ -184,25 +184,29 @@ def _signups_embeds(conn, event_id) -> list:
     per_type: dict = {}
     all_fids: set = set()
     for position_type in active_types:
+        pro_training = bool(ev["pro_mode"]) and position_type == "Training"
         ranked = sorted(
             kvkdb.get_signups(conn, event_id, position_type),
-            key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+            key=lambda s, _p=pro_training: (
+                -((s["kvk_points"] or 0) if _p else s["speedup_minutes"]), s["submitted_at"], s["fid"]))
         per_type[position_type] = ranked
         all_fids.update(s["fid"] for s in ranked)
     nicknames = _nicknames_for(all_fids)
 
     title = f"{theme.crossIcon} {ev['name']} - Signups"
     cont_title = f"{ev['name']} - Signups (cont.)"
-    description = f"{len(all_fids)} player(s) signed up. Ranked by total speedups."
+    description = f"{len(all_fids)} player(s) signed up. Ranked per type (KvK points for Pro training)."
     embeds = [discord.Embed(title=title, description=description, color=discord.Color.blue())]
     used = len(title) + len(description)
     for position_type in active_types:
+        pro_training = bool(ev["pro_mode"]) and position_type == "Training"
         signups = per_type[position_type]
         lines = []
         for rank, s in enumerate(signups, 1):
             nick = nicknames.get(s["fid"], "Unknown")  # the fid is shown separately below
             pref = _fmt_desired(s.get("desired_slots", []), grid)
-            lines.append(f"{rank}. {nick} ({s['fid']}) - **{format_speedups(s['speedup_minutes'])}**{pref}")
+            metric = f"{(s['kvk_points'] or 0):,} pts" if pro_training else format_speedups(s["speedup_minutes"])
+            lines.append(f"{rank}. {nick} ({s['fid']}) - **{metric}**{pref}")
         if not lines:
             lines = ["(no signups)"]
         icon = _POSITION_ICON.get(position_type, "")
@@ -316,6 +320,9 @@ class KvkReport(commands.Cog):
         groups: dict = {}
         for position_type in kvkdb.get_active_types(conn, event_id):
             signups = kvkdb.get_signups(conn, event_id, position_type)
+            if ev["pro_mode"] and position_type == "Training":
+                for s in signups:  # Pro-mode training ranks by computed KvK points, not raw speedups
+                    s["score"] = s["kvk_points"] or 0
             if ev["scope"] == "kingdom":
                 locks = kvkdb.get_locks(conn, event_id, position_type, 0)
                 groups[(position_type, 0)] = rank_and_assign(signups, full_day, slot_mode, locked=locks)

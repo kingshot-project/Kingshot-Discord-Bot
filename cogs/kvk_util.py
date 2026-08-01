@@ -210,7 +210,9 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
     """
     locked = dict(locked or {})
     times = generate_time_slots(slot_mode)
-    ranked = sorted(signups, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+    # Rank by "score" when the caller sets it (Pro-mode training uses KvK points); else by speedups.
+    ranked = sorted(
+        signups, key=lambda s: (-s.get("score", s["speedup_minutes"]), s["submitted_at"], s["fid"]))
 
     assigned = dict(locked)              # slot_index -> fid
     taken_fids = set(locked.values())

@@ -11,10 +11,14 @@ from discord.ext import commands
 from . import kvk_data as kvkdb
 from .kvk_util import (
     POSITION_TYPES,
+    TROOP_LEVELS,
+    compute_training_points,
     format_speedups,
     generate_time_slots,
     parse_desired_slots,
     parse_speedups,
+    parse_troop_count,
+    troop_tier,
     type_dates_for,
 )
 from .permission_handler import PermissionManager
@@ -184,6 +188,7 @@ class _KvkDraft:
         self.slot_mode = 0
         self.active_types: list[str] = []
         self.publish_channel_id: int | None = None
+        self.pro_mode = 0
 
 
 class _KvkCreateModal(discord.ui.Modal, title="Create KvK Event"):
@@ -283,6 +288,22 @@ class _SlotModeSelect(discord.ui.Select):
         await self.wizard_view.refresh(interaction)
 
 
+class _ProModeSelect(discord.ui.Select):
+    def __init__(self, wizard_view: "_KvkWizardView"):
+        options = [
+            discord.SelectOption(label="Standard mode", value="0", default=True),
+            discord.SelectOption(
+                label="Pro mode", value="1",
+                description="Training day collects troop levels and scores KvK points"),
+        ]
+        super().__init__(placeholder="Pick the event mode", options=options, min_values=1, max_values=1)
+        self.wizard_view = wizard_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.wizard_view.draft.pro_mode = int(self.values[0])
+        await self.wizard_view.refresh(interaction)
+
+
 class _TypesSelect(discord.ui.Select):
     def __init__(self, wizard_view: "_KvkWizardView"):
         options = [discord.SelectOption(label=t, value=t) for t in POSITION_TYPES]
@@ -317,10 +338,11 @@ class _KvkWizardView(discord.ui.View):
         self.cog = cog
         self.draft = draft
         self.add_item(_SlotModeSelect(self))
+        self.add_item(_ProModeSelect(self))
         self.add_item(_TypesSelect(self))
         self.add_item(_PublishChannelSelect(self))
         confirm_button = discord.ui.Button(
-            label="Confirm and create", style=discord.ButtonStyle.primary, row=3)
+            label="Confirm and create", style=discord.ButtonStyle.primary, row=4)
         confirm_button.callback = self.confirm
         self.add_item(confirm_button)
 
@@ -340,6 +362,7 @@ class _KvkWizardView(discord.ui.View):
         embed.add_field(name="Slots per alliance", value=n_text, inline=True)
         embed.add_field(
             name="Slot mode", value=f"{d.slot_mode} ({_SLOT_MODE_HINT[d.slot_mode]})", inline=True)
+        embed.add_field(name="Mode", value="Pro" if d.pro_mode else "Standard", inline=True)
         embed.add_field(name="Signup window (UTC)", value=f"{d.signup_open_at} to {d.signup_close_at}", inline=False)
         embed.add_field(name="Active types", value=types_text, inline=False)
         embed.add_field(name="Publish channel", value=channel_text, inline=False)
@@ -378,6 +401,7 @@ class _KvkWizardView(discord.ui.View):
             publish_channel_id=d.publish_channel_id,
             created_by=d.created_by,
             created_at=datetime.now(UTC).strftime(DT_FMT),
+            pro_mode=d.pro_mode,
         )
         kvkdb.set_event_types(self.cog.conn, event_id, type_dates)
 
@@ -509,18 +533,29 @@ class _SignupTypesView(discord.ui.View):
         if not self.selected_types:
             await interaction.response.send_message("Pick at least one position type first.", ephemeral=True)
             return
-        await interaction.response.send_modal(
-            _SignupSpeedupModal(self.cog, self.event_id, self.fid, self.selected_types))
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        pro_training = bool(ev and ev["pro_mode"]) and "Training" in self.selected_types
+        non_training = [t for t in self.selected_types if t != "Training"]
+        if pro_training and not non_training:
+            await interaction.response.send_modal(_ProTrainingModal(self.cog, self.event_id, self.fid))
+        elif pro_training:
+            await interaction.response.send_modal(
+                _SignupSpeedupModal(self.cog, self.event_id, self.fid, non_training, then_pro_training=True))
+        else:
+            await interaction.response.send_modal(
+                _SignupSpeedupModal(self.cog, self.event_id, self.fid, self.selected_types))
 
 
 class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
     """Step 2 of signup: one speedup input per chosen position type."""
 
-    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str]):
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str],
+                 then_pro_training: bool = False):
         super().__init__()
         self.cog = cog
         self.event_id = event_id
         self.fid = fid
+        self.then_pro_training = then_pro_training
         self.speedup_inputs: dict[str, discord.ui.TextInput] = {}
         for position_type in position_types:
             text_input = discord.ui.TextInput(label=f"{position_type} speedup (e.g. 7d 12h)", max_length=50)
@@ -555,9 +590,108 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
         # Preferred times only make sense for kingdom scope (full-day grid); alliance slots are
         # the first N times of the grid, so a preference there could not be honored.
         view = None
-        if ev and ev["scope"] == "kingdom":
+        if self.then_pro_training:
+            embed.set_footer(text="Now enter your Training details for Pro scoring.")
+            view = _ProTrainingEntryView(self.cog, self.event_id, self.fid)
+        elif ev and ev["scope"] == "kingdom":
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")
             view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys()))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class _ProTrainingEntryView(discord.ui.View):
+    """After non-training speedups are saved in a Pro event, opens the Pro training-day modal."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        button = discord.ui.Button(label="Enter Training details", style=discord.ButtonStyle.primary)
+        button.callback = self.enter
+        self.add_item(button)
+
+    async def enter(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(_ProTrainingModal(self.cog, self.event_id, self.fid))
+
+
+class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
+    """Pro-mode Training day: base level + hours (+ optional troop upgrade) -> computed KvK points."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int):
+        super().__init__()
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.base = discord.ui.Label(
+            text="Base troop level",
+            component=discord.ui.Select(
+                options=[discord.SelectOption(label=x, value=x) for x in TROOP_LEVELS],
+                min_values=1, max_values=1))
+        self.add_item(self.base)
+        self.hours = discord.ui.Label(
+            text="Hours of speedups", description="e.g. 20h or 1d 8h",
+            component=discord.ui.TextInput(placeholder="20h", max_length=50))
+        self.add_item(self.hours)
+        self.upgrade = discord.ui.Label(
+            text="Upgrade from level (optional)",
+            component=discord.ui.Select(
+                options=[discord.SelectOption(label=f"T{n}", value=str(n)) for n in range(1, 11)],
+                min_values=0, max_values=1))
+        self.add_item(self.upgrade)
+        self.count = discord.ui.Label(
+            text="Upgrade count (optional)", description="troops to upgrade, e.g. 900k",
+            component=discord.ui.TextInput(required=False, placeholder="900k", max_length=20))
+        self.add_item(self.count)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        base_vals = self.base.component.values
+        if not base_vals:
+            await interaction.response.send_message("Pick a base troop level.", ephemeral=True)
+            return
+        base_label = base_vals[0]
+        try:
+            base_tier = troop_tier(base_label)
+            hours_minutes = parse_speedups(self.hours.component.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not read the hours. Use a format like '20h' or '1d 8h'.", ephemeral=True)
+            return
+        upgrade_vals = self.upgrade.component.values
+        upgrade_from = int(upgrade_vals[0]) if upgrade_vals else None
+        try:
+            upgrade_count = parse_troop_count(self.count.component.value)
+            result = compute_training_points(base_tier, hours_minutes, upgrade_from, upgrade_count)
+        except ValueError as exc:
+            await interaction.response.send_message(f"{exc}. Fix and try again.", ephemeral=True)
+            return
+
+        submitted_at = datetime.now(UTC).strftime(DT_FMT)
+        kvkdb.upsert_signup(
+            self.cog.conn, self.event_id, self.fid, "Training", hours_minutes, interaction.user.id, submitted_at)
+        kvkdb.set_pro_training(
+            self.cog.conn, self.event_id, self.fid, base_label, upgrade_from, upgrade_count, result["kvk_points"])
+
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        embed = discord.Embed(
+            title=f"{theme.verifiedIcon} Training signup saved",
+            description=f"KvK: **{ev['name'] if ev else self.event_id}**\nPlayer fid: `{self.fid}`",
+            color=discord.Color.green())
+        embed.add_field(name="Base level", value=base_label, inline=True)
+        embed.add_field(name="Hours", value=format_speedups(hours_minutes), inline=True)
+        if upgrade_from is not None and result["upgraded"]:
+            embed.add_field(
+                name="Upgrades",
+                value=f"{result['upgraded']:,} from T{upgrade_from} = {result['upgrade_points']:,} pts",
+                inline=False)
+        embed.add_field(
+            name="New troops",
+            value=f"{result['new_troops']:,} x {base_label} = {result['new_points']:,} pts", inline=False)
+        embed.add_field(name="KvK points", value=f"**{result['kvk_points']:,}**", inline=False)
+        view = None
+        if ev and ev["scope"] == "kingdom":
+            embed.set_footer(text="Optional: add preferred times to say which slots you want.")
+            view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, ["Training"])
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 

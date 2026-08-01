@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import kvk_data as kvkdb
-from .kvk_util import POSITION_TYPES, generate_time_slots
+from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups
 from .permission_handler import PermissionManager
 
 DB_PATH = "db/kvk.sqlite"
@@ -33,6 +33,15 @@ class KvkScheduling(commands.Cog):
         is_admin, is_global = PermissionManager.is_admin(interaction.user.id)
         return bool(is_admin and is_global)
 
+    def _fids_for_discord(self, discord_id: int) -> list[int]:
+        users = sqlite3.connect("db/users.sqlite")
+        try:
+            rows = users.execute(
+                "SELECT fid FROM users WHERE discord_id = ? ORDER BY fid", (discord_id,)).fetchall()
+            return [r[0] for r in rows]
+        finally:
+            users.close()
+
     @app_commands.command(name="kvk_create", description="Start the KvK event setup wizard (Global Admin only).")
     async def kvk_create(self, interaction: discord.Interaction):
         if not self._is_global_admin(interaction):
@@ -42,6 +51,61 @@ class KvkScheduling(commands.Cog):
             await interaction.response.send_message("Use this command in a server, not a DM.", ephemeral=True)
             return
         await interaction.response.send_modal(_KvkCreateModal(self))
+
+    @app_commands.command(name="kvk_signup", description="Sign up for a KvK event (any registered player).")
+    @app_commands.describe(event_id="The KvK event ID")
+    async def kvk_signup(self, interaction: discord.Interaction, event_id: int):
+        fids = self._fids_for_discord(interaction.user.id)
+        if not fids:
+            await interaction.response.send_message("No linked fid found. Run /register first.", ephemeral=True)
+            return
+        if len(fids) == 1:
+            await self._start_signup(interaction, event_id, fids[0])
+            return
+        view = _FidSelectView(self, event_id, fids)
+        await interaction.response.send_message(
+            "You have more than one linked fid. Pick one:", view=view, ephemeral=True)
+
+    @app_commands.command(name="kvk_edit_signup", description="Edit a player's KvK signup (Global Admin only).")
+    @app_commands.describe(event_id="The KvK event ID", fid="The player's in-game fid")
+    async def kvk_edit_signup(self, interaction: discord.Interaction, event_id: int, fid: int):
+        if not self._is_global_admin(interaction):
+            await interaction.response.send_message("Global Admin only.", ephemeral=True)
+            return
+        await self._start_signup(interaction, event_id, fid)
+
+    async def _start_signup(
+        self, interaction: discord.Interaction, event_id: int, fid: int, *, edit: bool = False
+    ) -> None:
+        """Validate the event and signup window, then show the position-type picker."""
+        ev = kvkdb.get_event(self.conn, event_id)
+        if ev is None or ev["status"] != "collecting":
+            await self._send_or_edit(interaction, f"Event {event_id} is not open for signup.", edit=edit)
+            return
+
+        now = datetime.now(UTC).strftime(DT_FMT)
+        if not (ev["signup_open_at"] <= now <= ev["signup_close_at"]):
+            await self._send_or_edit(interaction, "The signup window for this event is closed.", edit=edit)
+            return
+
+        active_types = kvkdb.get_active_types(self.conn, event_id)
+        if not active_types:
+            await self._send_or_edit(interaction, f"Event {event_id} has no active position types.", edit=edit)
+            return
+
+        view = _SignupTypesView(self, event_id, fid, active_types)
+        await self._send_or_edit(
+            interaction, "Pick position types to sign up for (up to 3), then submit speedups.",
+            view=view, edit=edit)
+
+    @staticmethod
+    async def _send_or_edit(
+        interaction: discord.Interaction, content: str, *, view: discord.ui.View | None = None, edit: bool = False
+    ) -> None:
+        if edit:
+            await interaction.response.edit_message(content=content, view=view)
+        else:
+            await interaction.response.send_message(content, view=view, ephemeral=True)
 
 
 class _KvkDraft:
@@ -288,10 +352,7 @@ class _KvkTypeDatesModal(discord.ui.Modal, title="Set Position Type Dates"):
         if not posted:
             result_embed.add_field(
                 name="Announcement",
-                value=(
-                    "The bot could not post to the publish channel. "
-                    f"Run `/kvk_signup event_id:{event_id}` to check channel access."
-                ),
+                value="The bot could not post to that channel. Check its permissions there.",
                 inline=False,
             )
 
@@ -327,6 +388,84 @@ async def _post_announcement(
     except (discord.Forbidden, discord.HTTPException):
         return False
     return True
+
+
+class _FidSelect(discord.ui.Select):
+    def __init__(self, cog: KvkScheduling, event_id: int, fids: list[int]):
+        options = [discord.SelectOption(label=str(fid), value=str(fid)) for fid in fids]
+        super().__init__(placeholder="Pick your fid", options=options, min_values=1, max_values=1)
+        self.cog = cog
+        self.event_id = event_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.cog._start_signup(interaction, self.event_id, int(self.values[0]), edit=True)
+
+
+class _FidSelectView(discord.ui.View):
+    """Lets a player with more than one linked fid pick which one to sign up with."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fids: list[int]):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.add_item(_FidSelect(cog, event_id, fids))
+
+
+class _SignupTypeSelect(discord.ui.Select):
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, active_types: list[str]):
+        options = [discord.SelectOption(label=t, value=t) for t in active_types]
+        super().__init__(
+            placeholder="Pick position types (up to 3)", options=options,
+            min_values=1, max_values=min(3, len(active_types)))
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            _SignupSpeedupModal(self.cog, self.event_id, self.fid, list(self.values)))
+
+
+class _SignupTypesView(discord.ui.View):
+    """Step 1 of signup: pick which active position types to submit speedups for."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, active_types: list[str]):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.add_item(_SignupTypeSelect(cog, event_id, fid, active_types))
+
+
+class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
+    """Step 2 of signup: one speedup input per chosen position type."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str]):
+        super().__init__()
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.speedup_inputs: dict[str, discord.ui.TextInput] = {}
+        for position_type in position_types:
+            text_input = discord.ui.TextInput(label=f"{position_type} speedup (e.g. 7d 12h)", max_length=50)
+            self.speedup_inputs[position_type] = text_input
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        parsed: dict[str, int] = {}
+        for position_type, text_input in self.speedup_inputs.items():
+            try:
+                parsed[position_type] = parse_speedups(text_input.value)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Could not read the {position_type} speedup value. Use a format like '7d 12h'.",
+                    ephemeral=True)
+                return
+
+        submitted_at = datetime.now(UTC).strftime(DT_FMT)
+        for position_type, minutes in parsed.items():
+            kvkdb.upsert_signup(
+                self.cog.conn, self.event_id, self.fid, position_type, minutes,
+                interaction.user.id, submitted_at)
+
+        types_text = ", ".join(f"{position_type}: {minutes}m" for position_type, minutes in parsed.items())
+        await interaction.response.send_message(
+            f"Signup saved for fid {self.fid}: {types_text}", ephemeral=True)
 
 
 async def setup(bot):

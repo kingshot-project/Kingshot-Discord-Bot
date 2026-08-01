@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from . import kvk_data as kvkdb
-from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups, type_dates_for
+from .kvk_util import POSITION_TYPES, format_speedups, generate_time_slots, parse_speedups, type_dates_for
 from .permission_handler import PermissionManager
 from .pimp_my_bot import check_interaction_user, safe_edit_message, theme
 
@@ -537,9 +537,15 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
                 self.cog.conn, self.event_id, self.fid, position_type, minutes,
                 interaction.user.id, submitted_at)
 
-        types_text = ", ".join(f"{position_type}: {minutes}m" for position_type, minutes in parsed.items())
-        await interaction.response.send_message(
-            f"Signup saved for fid {self.fid}: {types_text}", ephemeral=True)
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        event_name = ev["name"] if ev else str(self.event_id)
+        embed = discord.Embed(
+            title=f"{theme.verifiedIcon} Signup saved",
+            description=f"KvK: **{event_name}**\nPlayer fid: `{self.fid}`",
+            color=discord.Color.green())
+        for position_type, minutes in parsed.items():
+            embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class _KvkEventSelect(discord.ui.Select):

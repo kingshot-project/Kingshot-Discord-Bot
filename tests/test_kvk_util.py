@@ -1,6 +1,20 @@
 import pytest
 
-from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign, type_dates_for
+from cogs.kvk_util import (
+    format_speedups,
+    generate_time_slots,
+    parse_speedups,
+    rank_and_assign,
+    type_dates_for,
+)
+
+
+@pytest.mark.parametrize("minutes,text", [
+    (7200, "5d"), (300, "5h"), (600, "10h"), (0, "0m"), (1440, "1d"),
+    (1500, "1d 1h"), (1501, "1d 1h 1m"), (90, "1h 30m"), (4200, "2d 22h"),
+])
+def test_format_speedups(minutes, text):
+    assert format_speedups(minutes) == text
 
 
 def test_type_dates_for_offsets_and_day_order():

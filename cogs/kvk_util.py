@@ -41,6 +41,20 @@ def parse_speedups(text: str) -> int:
     return total
 
 
+def format_speedups(minutes: int) -> str:
+    """Format total minutes back into 'Nd Nh Nm', dropping zero parts. 0 -> '0m'. Inverse of parse."""
+    days, rest = divmod(minutes, 1440)
+    hours, mins = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    return " ".join(parts) if parts else "0m"
+
+
 def generate_time_slots(slot_mode: int) -> list[str]:
     """Daily 30-min slot grid. Mode 0: 00:00..23:30 (48). Mode 1: offset, 49 entries.
     Mirrors MinisterSchedule.get_time_slots (cogs/minister_schedule.py:288)."""

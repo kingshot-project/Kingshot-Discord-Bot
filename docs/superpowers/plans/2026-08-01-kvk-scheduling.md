@@ -4,69 +4,65 @@
 
 **Goal:** Add a self-service KvK minister-slot planner: admins create a KvK event, players submit which positions they want and how many speedups they will spend, and the bot ranks by speedups and auto-assigns players into 30-minute slots with admin override, then publishes.
 
-**Architecture:** A standalone subsystem isolated from `minister_*`. Pure, deterministic logic (speedup parsing, slot-grid generation, ranking + assignment) lives in `cogs/kvk_util.py` and is fully unit-tested. Two Discord cogs — `cogs/kvk_scheduling.py` (event lifecycle, self-service signup, all `db/kvk.sqlite` access) and `cogs/kvk_report.py` (report, override preview, publish) — hold the Discord/IO layer. Data lives in a new `db/kvk.sqlite`.
+**Architecture:** A standalone subsystem isolated from `minister_*`. Pure, deterministic logic (speedup parsing, slot-grid generation, ranking + assignment) lives in `cogs/kvk_util.py`; the `db/kvk.sqlite` data layer lives in `cogs/kvk_data.py` — **both are discord-free and fully unit-tested**. Two Discord cogs — `cogs/kvk_scheduling.py` (event lifecycle, self-service signup) and `cogs/kvk_report.py` (report, override, publish) — hold the Discord/IO layer only.
 
-**Tech Stack:** Python 3.12, discord.py 2.7.1, stdlib `sqlite3` (WAL), `pytest` for the pure/DB units. Discord `fid` link reuses the existing `/register` flow (`users.sqlite`).
+**Tech Stack:** Python 3.12, discord.py 2.7.1, stdlib `sqlite3` (WAL), `pytest` for the pure/data units (dev-only, NOT added to `requirements.txt`; install with `pip install pytest`). Discord `fid` link reuses the existing `/register` flow (`users.sqlite`).
 
 ## Global Constraints
 
-- Python target **3.12**; no new runtime dependencies (OCR excluded — do not import onnxruntime/rapidocr).
-- All new `.py` files MUST pass `ruff check` under the repo `pyproject.toml` ruleset (E,F,W,I,UP,B,C4,SIM,RUF; line-length 120). Run `ruff check <file>` before each commit.
+- Python target **3.12**; no new runtime dependencies (OCR excluded — do not import onnxruntime/rapidocr). `pytest` is dev-only.
+- **Import convention (repo has NO `cogs/__init__.py`):** cogs import siblings **relatively** (`from .kvk_util import ...`, `from . import kvk_data as kvkdb`) — this is how every existing cog works and how `main.py` loads `cogs.<name>`. Tests import via the namespace package (`from cogs.kvk_util import ...`) with the **repo root** on `sys.path` (see `tests/conftest.py`).
+- All new `.py` files MUST pass `ruff check` under the repo `pyproject.toml` ruleset (E,F,W,I,UP,B,C4,SIM,RUF; line-length 120). Keep imports sorted (I001), no bare `except: pass` (use `contextlib.suppress`), `zip(..., strict=...)` (B905). Run `ruff check <file>` before each commit.
 - SQLite: additive schema only; `PRAGMA journal_mode=WAL`, `synchronous=NORMAL`; every connection closed via `try/finally`; guard every `fetchone()` before indexing.
-- `users.alliance` has **TEXT affinity** (stores the id as a string, e.g. `'1'`) while `alliance_list.alliance_id` is INTEGER — compare/group alliance ids **as strings**.
+- `users.alliance` has **TEXT affinity** (stores the id as a string, e.g. `'1'`) while `alliance_list.alliance_id` is INTEGER — compare/group alliance ids **as strings**; a non-numeric value is skipped, not crashed.
 - Position types with slots are exactly: `"Training"`, `"Research"`, `"Building"`. "General" is NOT a position — it is universal speedups the player folds into a chosen position's number.
-- Slot counts: `slot_mode=0` → 48 slots/day; `slot_mode=1` → 49 slots/day (two 15-min edge slots + 47 full).
-- Permissions: `/kvk_create`, `/kvk_report`, `/kvk_publish`, `/kvk_edit_signup` = Global Admin; `/kvk_signup` = any registered player.
+- Slot counts: `slot_mode=0` → 48 slots/day; `slot_mode=1` → 49 slots/day.
+- Datetimes are stored and compared in one pinned format: **`YYYY-MM-DD HH:MM` UTC**, validated with `datetime.strptime`. Never compare unpinned strings.
+- Permissions: `/kvk_create`, `/kvk_report`, `/kvk_publish`, `/kvk_edit_signup` = Global Admin; `/kvk_signup` = any registered player. Reuse `PermissionManager.is_admin(user_id) -> (is_admin, is_global)` from `cogs/permission_handler.py` (do not hand-roll the SQL).
 - Commit messages end with: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ---
 
 ## File Structure
 
-- Create `cogs/kvk_util.py` — pure helpers: `parse_speedups`, `generate_time_slots`, `rank_and_assign`. No discord/sqlite imports.
-- Create `cogs/kvk_scheduling.py` — cog: schema init + CRUD on `db/kvk.sqlite`, `/kvk_create` wizard, `/kvk_signup`, `/kvk_edit_signup`.
+- Create `cogs/kvk_util.py` — pure: `parse_speedups`, `generate_time_slots`, `rank_and_assign`, `POSITION_TYPES`. No discord/sqlite imports.
+- Create `cogs/kvk_data.py` — pure sqlite data layer for `db/kvk.sqlite`: `init_schema` + CRUD. No discord import.
+- Create `cogs/kvk_scheduling.py` — cog: `/kvk_create` wizard, `/kvk_signup`, `/kvk_edit_signup`. Holds the persistent connection and admin check.
 - Create `cogs/kvk_report.py` — cog: `/kvk_report` (rank+assign+editable preview), `/kvk_publish`.
-- Create `tests/conftest.py`, `tests/test_kvk_util.py`, `tests/test_kvk_db.py` — pytest.
-- Modify the cog loader (the file that `load_extension`s `cogs/*`) to register the two new cogs.
-
-`POSITION_TYPES = ("Training", "Research", "Building")` is defined once in `cogs/kvk_util.py` and imported everywhere.
+- Create `tests/conftest.py`, `tests/test_kvk_util.py`, `tests/test_kvk_data.py` — pytest.
+- Modify `main.py` cog list (`main.py:1499`, loaded as `cogs.<name>` at `:1512`) — add bare names `"kvk_scheduling"`, `"kvk_report"`.
 
 ---
 
-## Task 1: Speedup parser (`parse_speedups`)
+## Task 1: Speedup parser + slot grid (`cogs/kvk_util.py`)
 
 **Files:**
-- Create: `cogs/kvk_util.py`
-- Create: `tests/test_kvk_util.py`
-- Create: `tests/conftest.py`
+- Create: `cogs/kvk_util.py`, `tests/test_kvk_util.py`, `tests/conftest.py`
 
 **Interfaces:**
-- Produces: `parse_speedups(text: str) -> int` (minutes). Raises `ValueError` on unparseable input. `POSITION_TYPES: tuple[str, str, str]`.
+- Produces: `parse_speedups(text) -> int` (minutes, raises ValueError); `generate_time_slots(slot_mode) -> list[str]` (48 for mode 0, 49 for mode 1); `POSITION_TYPES`.
 
-- [ ] **Step 1: Make `cogs/` importable in tests — write `tests/conftest.py`**
+- [ ] **Step 1: `tests/conftest.py` puts the repo ROOT on the path**
 
 ```python
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cogs"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing tests**
 
 ```python
 # tests/test_kvk_util.py
 import pytest
-from kvk_util import parse_speedups
+
+from cogs.kvk_util import generate_time_slots, parse_speedups, rank_and_assign
 
 
 @pytest.mark.parametrize("text,minutes", [
-    ("70h", 70 * 60),
-    ("7d", 7 * 1440),
-    ("7d 12h", 7 * 1440 + 12 * 60),
-    ("2d4h30m", 2 * 1440 + 4 * 60 + 30),
-    ("90m", 90),
-    ("  3D ", 3 * 1440),
+    ("70h", 70 * 60), ("7d", 7 * 1440), ("7d 12h", 7 * 1440 + 12 * 60),
+    ("2d4h30m", 2 * 1440 + 4 * 60 + 30), ("90m", 90), ("  3D ", 3 * 1440),
     ("1d 1h 1m", 1440 + 60 + 1),
 ])
 def test_parse_speedups_ok(text, minutes):
@@ -77,107 +73,56 @@ def test_parse_speedups_ok(text, minutes):
 def test_parse_speedups_invalid(bad):
     with pytest.raises(ValueError):
         parse_speedups(bad)
+
+
+def test_slots_mode0():
+    slots = generate_time_slots(0)
+    assert len(slots) == 48 and slots[0] == "00:00" and slots[1] == "00:30" and slots[-1] == "23:30"
+
+
+def test_slots_mode1():
+    slots = generate_time_slots(1)
+    assert len(slots) == 49 and slots[0] == "00:00" and slots[1] == "00:15" and slots[-1] == "23:45"
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 3: Run — expect FAIL** (`ModuleNotFoundError: No module named 'cogs.kvk_util'`)
 
 Run: `python -m pytest tests/test_kvk_util.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'kvk_util'`.
 
-- [ ] **Step 4: Write minimal implementation**
+- [ ] **Step 4: Implement `cogs/kvk_util.py`**
 
 ```python
-# cogs/kvk_util.py
 """Pure, dependency-free helpers for the KvK scheduler (no discord/sqlite imports)."""
 import re
 
 POSITION_TYPES = ("Training", "Research", "Building")
 
 _UNIT_MINUTES = {"d": 1440, "h": 60, "m": 1}
-_TOKEN_RE = re.compile(r"(\d+)\s*([dhm])", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"(\d+)\s*([dhm])")
 
 
 def parse_speedups(text: str) -> int:
     """Parse a free-form speedup duration ('7d 12h', '70h', '2d4h30m') into total minutes.
 
-    Units: d=day(1440m), h=hour(60m), m=minute(1m). Case-insensitive, spaces optional.
-    Raises ValueError if no valid unit token is found or stray characters remain.
+    Units: d=1440m, h=60m, m=1m. Spaces optional, case-insensitive.
+    Raises ValueError on empty input, no unit token, or stray characters.
     """
-    if text is None:
+    if not text or not text.strip():
         raise ValueError("empty speedup value")
     cleaned = text.strip().lower()
-    if not cleaned:
-        raise ValueError("empty speedup value")
     total = 0
     matched = False
     for amount, unit in _TOKEN_RE.findall(cleaned):
         total += int(amount) * _UNIT_MINUTES[unit]
         matched = True
-    # Reject input that had leftover non-token characters (e.g. "5x", "12").
     if not matched or _TOKEN_RE.sub("", cleaned).strip():
         raise ValueError(f"could not parse speedups: {text!r}")
     return total
-```
-
-- [ ] **Step 5: Run test to verify it passes**
-
-Run: `python -m pytest tests/test_kvk_util.py -q`
-Expected: PASS (all parametrized cases).
-
-- [ ] **Step 6: Lint and commit**
-
-```bash
-ruff check cogs/kvk_util.py tests/
-git add cogs/kvk_util.py tests/conftest.py tests/test_kvk_util.py
-git commit -m "feat(kvk): speedup duration parser" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
-
----
-
-## Task 2: Time-slot grid (`generate_time_slots`)
-
-**Files:**
-- Modify: `cogs/kvk_util.py`
-- Modify: `tests/test_kvk_util.py`
-
-**Interfaces:**
-- Produces: `generate_time_slots(slot_mode: int) -> list[str]` — `HH:MM` strings; 48 entries for mode 0, 49 for mode 1. Identical output to `MinisterSchedule.get_time_slots`.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# append to tests/test_kvk_util.py
-from kvk_util import generate_time_slots
 
 
-def test_slots_mode0():
-    slots = generate_time_slots(0)
-    assert len(slots) == 48
-    assert slots[0] == "00:00"
-    assert slots[1] == "00:30"
-    assert slots[-1] == "23:30"
-
-
-def test_slots_mode1():
-    slots = generate_time_slots(1)
-    assert len(slots) == 49
-    assert slots[0] == "00:00"
-    assert slots[1] == "00:15"
-    assert slots[2] == "00:45"
-    assert slots[-1] == "23:45"
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `python -m pytest tests/test_kvk_util.py -q -k slots`
-Expected: FAIL — `ImportError: cannot import name 'generate_time_slots'`.
-
-- [ ] **Step 3: Implement (append to `cogs/kvk_util.py`)**
-
-```python
 def generate_time_slots(slot_mode: int) -> list[str]:
-    """Daily 30-minute slot grid. Mode 0: 00:00..23:30 (48). Mode 1: offset, two 15-min
-    edge slots plus 47 full slots (49). Mirrors MinisterSchedule.get_time_slots."""
+    """Daily 30-min slot grid. Mode 0: 00:00..23:30 (48). Mode 1: offset, 49 entries.
+    Mirrors MinisterSchedule.get_time_slots (cogs/minister_schedule.py:288)."""
     slots: list[str] = []
     if slot_mode == 0:
         for hour in range(24):
@@ -194,166 +139,123 @@ def generate_time_slots(slot_mode: int) -> list[str]:
     return slots
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+(`rank_and_assign` is added in Task 2 — the Task-1 test imports it, so both land before the suite is green; run the parser/slots tests with `-k "parse or slots"` until Task 2 lands.)
 
-Run: `python -m pytest tests/test_kvk_util.py -q -k slots`
-Expected: PASS.
+- [ ] **Step 5: Run parser/slots tests — expect PASS**
 
-- [ ] **Step 5: Lint and commit**
+Run: `python -m pytest tests/test_kvk_util.py -q -k "parse or slots"`
+
+- [ ] **Step 6: Lint & commit**
 
 ```bash
-ruff check cogs/kvk_util.py tests/test_kvk_util.py
-git add cogs/kvk_util.py tests/test_kvk_util.py
-git commit -m "feat(kvk): daily 30-min slot grid (48/49)" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+ruff check cogs/kvk_util.py tests/
+git add cogs/kvk_util.py tests/conftest.py tests/test_kvk_util.py
+git commit -m "feat(kvk): speedup parser and slot grid" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 3: Ranking + auto-assignment (`rank_and_assign`)
+## Task 2: Ranking + auto-assignment (`rank_and_assign`)
 
 **Files:**
-- Modify: `cogs/kvk_util.py`
-- Modify: `tests/test_kvk_util.py`
+- Modify: `cogs/kvk_util.py`, `tests/test_kvk_util.py`
 
 **Interfaces:**
 - Consumes: `generate_time_slots`.
-- Produces:
-  `rank_and_assign(signups, slot_count, slot_mode, locked=None) -> list[dict]`
-  - `signups`: iterable of `{"fid": int, "speedup_minutes": int, "submitted_at": str}`
-    (already filtered to ONE scope-unit and ONE position type by the caller).
-  - `slot_count`: number of slots (N for alliance scope; 48/49 for kingdom — caller passes `len(generate_time_slots(slot_mode))`).
-  - `locked`: optional `{slot_index: fid}` pins that must be preserved.
-  - Returns a list of length `slot_count`: `{"slot_index": i, "slot_time": str, "fid": int | None}`, ranked by `speedup_minutes` DESC, tie-break `submitted_at` ASC then `fid` ASC. Locked fids are placed at their index and removed from the pool; remaining unlocked slots are filled in rank order; leftover slots get `fid=None`.
+- Produces: `rank_and_assign(signups, slot_count, slot_mode, locked=None) -> list[dict]`.
+  - `signups`: iterable of `{"fid", "speedup_minutes", "submitted_at"}` (already filtered to one scope-unit + one type).
+  - `locked`: `{slot_index: fid}` pinned and removed from the pool.
+  - Returns length-`slot_count` list of `{"slot_index", "slot_time", "fid", "locked"}` (fid may be None). Sort: `speedup_minutes` DESC, `submitted_at` ASC, `fid` ASC. Locked rows carry `locked=1`; others `locked=0`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Append failing tests to `tests/test_kvk_util.py`**
 
 ```python
-# append to tests/test_kvk_util.py
-from kvk_util import rank_and_assign
-
-
 def _s(fid, minutes, at):
     return {"fid": fid, "speedup_minutes": minutes, "submitted_at": at}
 
 
 def test_assign_orders_by_speedups_desc():
-    signups = [_s(1, 100, "t1"), _s(2, 300, "t2"), _s(3, 200, "t3")]
-    out = rank_and_assign(signups, slot_count=3, slot_mode=0)
+    out = rank_and_assign([_s(1, 100, "t1"), _s(2, 300, "t2"), _s(3, 200, "t3")], 3, 0)
     assert [r["fid"] for r in out] == [2, 3, 1]
-    assert out[0]["slot_time"] == "00:00"
-    assert out[1]["slot_time"] == "00:30"
+    assert out[0]["slot_time"] == "00:00" and out[1]["slot_time"] == "00:30"
 
 
 def test_assign_tiebreak_earlier_then_lower_fid():
-    signups = [_s(5, 100, "t2"), _s(2, 100, "t2"), _s(9, 100, "t1")]
-    out = rank_and_assign(signups, slot_count=3, slot_mode=0)
-    assert [r["fid"] for r in out] == [9, 2, 5]  # t1 first; then equal time -> lower fid
+    out = rank_and_assign([_s(5, 100, "t2"), _s(2, 100, "t2"), _s(9, 100, "t1")], 3, 0)
+    assert [r["fid"] for r in out] == [9, 2, 5]
 
 
 def test_assign_caps_and_leaves_empty_slots():
-    signups = [_s(1, 100, "t1")]
-    out = rank_and_assign(signups, slot_count=3, slot_mode=0)
+    out = rank_and_assign([_s(1, 100, "t1")], 3, 0)
     assert [r["fid"] for r in out] == [1, None, None]
 
 
 def test_assign_respects_locks():
-    signups = [_s(1, 500, "t1"), _s(2, 400, "t2"), _s(3, 300, "t3")]
-    out = rank_and_assign(signups, slot_count=3, slot_mode=0, locked={0: 3})
-    # fid 3 pinned at slot 0; 1 and 2 fill remaining in rank order
-    assert out[0]["fid"] == 3
+    out = rank_and_assign([_s(1, 500, "t1"), _s(2, 400, "t2"), _s(3, 300, "t3")], 3, 0, locked={0: 3})
+    assert out[0]["fid"] == 3 and out[0]["locked"] == 1
     assert [r["fid"] for r in out[1:]] == [1, 2]
 
 
 def test_assign_kingdom_49():
-    slots = 49
-    signups = [_s(i, 1000 - i, f"t{i:03}") for i in range(60)]
-    out = rank_and_assign(signups, slot_count=slots, slot_mode=1)
-    assert len(out) == 49
-    assert out[0]["fid"] == 0 and out[0]["slot_time"] == "00:00"
-    assert out[-1]["slot_time"] == "23:45"
+    out = rank_and_assign([_s(i, 1000 - i, f"t{i:03}") for i in range(60)], 49, 1)
+    assert len(out) == 49 and out[0]["fid"] == 0 and out[-1]["slot_time"] == "23:45"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run — expect FAIL** (`ImportError: cannot import name 'rank_and_assign'`)
 
-Run: `python -m pytest tests/test_kvk_util.py -q -k assign`
-Expected: FAIL — `ImportError: cannot import name 'rank_and_assign'`.
-
-- [ ] **Step 3: Implement (append to `cogs/kvk_util.py`)**
+- [ ] **Step 3: Append implementation to `cogs/kvk_util.py`**
 
 ```python
 def rank_and_assign(signups, slot_count, slot_mode, locked=None):
-    """Rank signups by speedups and place them into `slot_count` slots.
-
-    signups: iterable of {"fid", "speedup_minutes", "submitted_at"} for one scope-unit+type.
-    Sort: speedup_minutes DESC, then submitted_at ASC, then fid ASC.
-    locked: {slot_index: fid} preserved as-is; those fids are removed from the pool.
-    Returns list[{"slot_index", "slot_time", "fid"}] of length slot_count (fid may be None).
-    """
+    """Rank signups by speedups and place them into slot_count slots (see module docstring)."""
     locked = dict(locked or {})
     times = generate_time_slots(slot_mode)
-    ranked = sorted(
-        signups,
-        key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]),
-    )
+    ranked = sorted(signups, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
     locked_fids = set(locked.values())
     pool = [s["fid"] for s in ranked if s["fid"] not in locked_fids]
-
     result = []
     pi = 0
     for i in range(slot_count):
         slot_time = times[i] if i < len(times) else ""
         if i in locked:
-            fid = locked[i]
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": locked[i], "locked": 1})
         elif pi < len(pool):
-            fid = pool[pi]
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": pool[pi], "locked": 0})
             pi += 1
         else:
-            fid = None
-        result.append({"slot_index": i, "slot_time": slot_time, "fid": fid})
+            result.append({"slot_index": i, "slot_time": slot_time, "fid": None, "locked": 0})
     return result
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run full util suite — expect PASS**
 
 Run: `python -m pytest tests/test_kvk_util.py -q`
-Expected: PASS (all util tests).
 
-- [ ] **Step 5: Lint and commit**
+- [ ] **Step 5: Lint & commit**
 
 ```bash
 ruff check cogs/kvk_util.py tests/test_kvk_util.py
 git add cogs/kvk_util.py tests/test_kvk_util.py
-git commit -m "feat(kvk): ranking + slot auto-assignment" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat(kvk): ranking + slot auto-assignment with locks" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 4: Data layer — schema + CRUD (`db/kvk.sqlite`)
+## Task 3: Data layer (`cogs/kvk_data.py`, discord-free)
 
 **Files:**
-- Create: `cogs/kvk_scheduling.py` (data-layer portion only in this task)
-- Create: `tests/test_kvk_db.py`
+- Create: `cogs/kvk_data.py`, `tests/test_kvk_data.py`
 
-**Interfaces:**
-- Produces a module-level, testable DB API in `cogs/kvk_scheduling.py` that accepts an explicit `conn` so tests can pass an in-memory connection:
-  - `init_schema(conn)` — create the 4 tables (idempotent).
-  - `create_event(conn, **fields) -> int` (returns event id).
-  - `set_event_types(conn, event_id, types)` — `types` = list of `(position_type, type_date)`.
-  - `upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at)`.
-  - `get_signups(conn, event_id, position_type) -> list[dict]` (`fid, speedup_minutes, submitted_at`).
-  - `save_slots(conn, event_id, position_type, alliance_id, rows)` — replace that group's slots with `rows` from `rank_and_assign`.
-  - `get_slots(conn, event_id) -> list[dict]`.
-  - `set_slot(conn, event_id, position_type, alliance_id, slot_index, fid, locked)` — admin override.
-  - `set_status(conn, event_id, status)` / `get_event(conn, event_id) -> dict | None`.
+**Interfaces (all take an explicit `conn` so tests use `:memory:`):**
+`init_schema(conn)`, `create_event(conn, **fields) -> int`, `set_event_types(conn, event_id, types)`, `get_active_types(conn, event_id) -> list[str]`, `get_event(conn, event_id) -> dict | None`, `set_status(conn, event_id, status)`, `upsert_signup(conn, ...)`, `get_signups(conn, event_id, position_type) -> list[dict]`, `get_signup_minutes(conn, event_id) -> dict[(fid,type)->minutes]`, `save_slots(conn, event_id, position_type, alliance_id, rows)`, `set_slot(conn, ..., slot_index, fid, locked)`, `get_locks(conn, event_id, position_type, alliance_id) -> dict[index->fid]`, `get_slots(conn, event_id) -> list[dict]`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write `tests/test_kvk_data.py`**
 
 ```python
-# tests/test_kvk_db.py
-import sqlite3
 import importlib
+import sqlite3
 
-kvk = importlib.import_module("kvk_scheduling")
+kvk = importlib.import_module("cogs.kvk_data")
 
 
 def _conn():
@@ -362,71 +264,60 @@ def _conn():
     return c
 
 
-def test_create_event_and_types():
+def test_create_event_and_active_types():
     c = _conn()
     eid = kvk.create_event(
         c, guild_id=1, name="KvK 42", event_date="2026-09-01", scope="alliance",
-        slots_per_alliance=5, slot_mode=0, signup_open_at="2026-08-20T00:00",
-        signup_close_at="2026-08-31T00:00", publish_channel_id=99, created_by=7,
-        created_at="2026-08-19T00:00",
+        slots_per_alliance=5, slot_mode=0, signup_open_at="2026-08-20 00:00",
+        signup_close_at="2026-08-31 00:00", publish_channel_id=99, created_by=7,
+        created_at="2026-08-19 00:00",
     )
-    assert isinstance(eid, int)
     kvk.set_event_types(c, eid, [("Training", "2026-09-01"), ("Research", "2026-09-02")])
     ev = kvk.get_event(c, eid)
     assert ev["name"] == "KvK 42" and ev["status"] == "collecting"
+    assert set(kvk.get_active_types(c, eid)) == {"Training", "Research"}
 
 
-def test_signup_upsert_is_idempotent():
+def test_signup_upsert_idempotent():
     c = _conn()
     eid = kvk.create_event(
         c, guild_id=1, name="K", event_date="2026-09-01", scope="kingdom",
         slots_per_alliance=None, slot_mode=1, signup_open_at="a", signup_close_at="b",
         publish_channel_id=None, created_by=1, created_at="c",
     )
-    kvk.upsert_signup(c, eid, fid=100, position_type="Training",
-                      speedup_minutes=600, submitted_by=100, submitted_at="t1")
-    kvk.upsert_signup(c, eid, fid=100, position_type="Training",
-                      speedup_minutes=900, submitted_by=100, submitted_at="t2")
-    rows = kvk.get_signups(c, eid, "Training")
-    assert rows == [{"fid": 100, "speedup_minutes": 900, "submitted_at": "t2"}]
+    kvk.upsert_signup(c, eid, 100, "Training", 600, 100, "t1")
+    kvk.upsert_signup(c, eid, 100, "Training", 900, 100, "t2")
+    assert kvk.get_signups(c, eid, "Training") == [{"fid": 100, "speedup_minutes": 900, "submitted_at": "t2"}]
 
 
-def test_save_and_override_slots():
+def test_slots_save_override_and_locks():
     c = _conn()
     eid = kvk.create_event(
         c, guild_id=1, name="K", event_date="d", scope="alliance",
         slots_per_alliance=2, slot_mode=0, signup_open_at="a", signup_close_at="b",
         publish_channel_id=None, created_by=1, created_at="c",
     )
-    rows = [
-        {"slot_index": 0, "slot_time": "00:00", "fid": 1},
-        {"slot_index": 1, "slot_time": "00:30", "fid": None},
-    ]
-    kvk.save_slots(c, eid, "Training", alliance_id=5, rows=rows)
-    kvk.set_slot(c, eid, "Training", alliance_id=5, slot_index=1, fid=42, locked=1)
+    kvk.save_slots(c, eid, "Training", 5, [
+        {"slot_index": 0, "slot_time": "00:00", "fid": 1, "locked": 0},
+        {"slot_index": 1, "slot_time": "00:30", "fid": None, "locked": 0},
+    ])
+    kvk.set_slot(c, eid, "Training", 5, 1, fid=42, locked=1)
     got = {(r["slot_index"], r["fid"], r["locked"]) for r in kvk.get_slots(c, eid)}
     assert (0, 1, 0) in got and (1, 42, 1) in got
+    assert kvk.get_locks(c, eid, "Training", 5) == {1: 42}
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run — expect FAIL** (`ModuleNotFoundError: No module named 'cogs.kvk_data'`)
 
-Run: `python -m pytest tests/test_kvk_db.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'kvk_scheduling'` (or missing `init_schema`).
-
-- [ ] **Step 3: Implement the data layer at the top of `cogs/kvk_scheduling.py`**
+- [ ] **Step 3: Implement `cogs/kvk_data.py`**
 
 ```python
-"""KvK scheduler: event lifecycle, self-service signup, and all db/kvk.sqlite access."""
-import os
+"""Pure sqlite data layer for db/kvk.sqlite (no discord import — unit-testable)."""
 import sqlite3
 
-import discord
-from discord import app_commands
-from discord.ext import commands
-
-from kvk_util import POSITION_TYPES, parse_speedups  # noqa: F401  (used by later tasks)
-
-DB_PATH = "db/kvk.sqlite"
+_EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
+               "slot_mode", "signup_open_at", "signup_close_at", "publish_channel_id",
+               "status", "created_by", "created_at")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -435,43 +326,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS kvk_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            event_date TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            slots_per_alliance INTEGER,
-            slot_mode INTEGER NOT NULL DEFAULT 0,
-            signup_open_at TEXT NOT NULL,
-            signup_close_at TEXT NOT NULL,
-            publish_channel_id INTEGER,
-            status TEXT NOT NULL DEFAULT 'collecting',
-            created_by INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+            event_date TEXT NOT NULL, scope TEXT NOT NULL, slots_per_alliance INTEGER,
+            slot_mode INTEGER NOT NULL DEFAULT 0, signup_open_at TEXT NOT NULL,
+            signup_close_at TEXT NOT NULL, publish_channel_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'collecting', created_by INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS kvk_event_types (
-            event_id INTEGER NOT NULL,
-            position_type TEXT NOT NULL,
-            type_date TEXT NOT NULL,
+            event_id INTEGER NOT NULL, position_type TEXT NOT NULL, type_date TEXT NOT NULL,
             PRIMARY KEY (event_id, position_type)
         );
         CREATE TABLE IF NOT EXISTS kvk_signups (
-            event_id INTEGER NOT NULL,
-            fid INTEGER NOT NULL,
-            position_type TEXT NOT NULL,
-            speedup_minutes INTEGER NOT NULL,
-            submitted_by INTEGER NOT NULL,
-            submitted_at TEXT NOT NULL,
+            event_id INTEGER NOT NULL, fid INTEGER NOT NULL, position_type TEXT NOT NULL,
+            speedup_minutes INTEGER NOT NULL, submitted_by INTEGER NOT NULL, submitted_at TEXT NOT NULL,
             PRIMARY KEY (event_id, fid, position_type)
         );
         CREATE TABLE IF NOT EXISTS kvk_slots (
-            event_id INTEGER NOT NULL,
-            position_type TEXT NOT NULL,
-            alliance_id INTEGER NOT NULL DEFAULT 0,
-            slot_index INTEGER NOT NULL,
-            slot_time TEXT NOT NULL,
-            fid INTEGER,
-            locked INTEGER NOT NULL DEFAULT 0,
+            event_id INTEGER NOT NULL, position_type TEXT NOT NULL,
+            alliance_id INTEGER NOT NULL DEFAULT 0, slot_index INTEGER NOT NULL,
+            slot_time TEXT NOT NULL, fid INTEGER, locked INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (event_id, position_type, alliance_id, slot_index)
         );
         """
@@ -481,13 +354,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 def create_event(conn, **f) -> int:
     cur = conn.execute(
-        """INSERT INTO kvk_events
-           (guild_id, name, event_date, scope, slots_per_alliance, slot_mode,
-            signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at)
+        """INSERT INTO kvk_events (guild_id, name, event_date, scope, slots_per_alliance, slot_mode,
+           signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?)""",
-        (f["guild_id"], f["name"], f["event_date"], f["scope"], f["slots_per_alliance"],
-         f["slot_mode"], f["signup_open_at"], f["signup_close_at"], f["publish_channel_id"],
-         f["created_by"], f["created_at"]),
+        (f["guild_id"], f["name"], f["event_date"], f["scope"], f["slots_per_alliance"], f["slot_mode"],
+         f["signup_open_at"], f["signup_close_at"], f["publish_channel_id"], f["created_by"], f["created_at"]),
     )
     conn.commit()
     return cur.lastrowid
@@ -501,10 +372,15 @@ def set_event_types(conn, event_id, types) -> None:
     conn.commit()
 
 
+def get_active_types(conn, event_id):
+    rows = conn.execute(
+        "SELECT position_type FROM kvk_event_types WHERE event_id = ?", (event_id,)).fetchall()
+    return [r[0] for r in rows]
+
+
 def get_event(conn, event_id):
-    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM kvk_events WHERE id = ?", (event_id,)).fetchone()
-    return dict(row) if row else None
+    return dict(zip(_EVENT_COLS, row)) if row else None
 
 
 def set_status(conn, event_id, status) -> None:
@@ -524,24 +400,25 @@ def upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted
 
 def get_signups(conn, event_id, position_type):
     rows = conn.execute(
-        """SELECT fid, speedup_minutes, submitted_at FROM kvk_signups
-           WHERE event_id = ? AND position_type = ?""",
-        (event_id, position_type),
-    ).fetchall()
+        "SELECT fid, speedup_minutes, submitted_at FROM kvk_signups WHERE event_id = ? AND position_type = ?",
+        (event_id, position_type)).fetchall()
     return [{"fid": r[0], "speedup_minutes": r[1], "submitted_at": r[2]} for r in rows]
 
 
+def get_signup_minutes(conn, event_id):
+    rows = conn.execute(
+        "SELECT fid, position_type, speedup_minutes FROM kvk_signups WHERE event_id = ?", (event_id,)).fetchall()
+    return {(r[0], r[1]): r[2] for r in rows}
+
+
 def save_slots(conn, event_id, position_type, alliance_id, rows) -> None:
-    conn.execute(
-        "DELETE FROM kvk_slots WHERE event_id = ? AND position_type = ? AND alliance_id = ?",
-        (event_id, position_type, alliance_id),
-    )
+    conn.execute("DELETE FROM kvk_slots WHERE event_id = ? AND position_type = ? AND alliance_id = ?",
+                 (event_id, position_type, alliance_id))
     conn.executemany(
-        """INSERT INTO kvk_slots
-           (event_id, position_type, alliance_id, slot_index, slot_time, fid, locked)
-           VALUES (?, ?, ?, ?, ?, ?, 0)""",
-        [(event_id, position_type, alliance_id, r["slot_index"], r["slot_time"], r["fid"]) for r in rows],
-    )
+        """INSERT INTO kvk_slots (event_id, position_type, alliance_id, slot_index, slot_time, fid, locked)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        [(event_id, position_type, alliance_id, r["slot_index"], r["slot_time"], r["fid"], r.get("locked", 0))
+         for r in rows])
     conn.commit()
 
 
@@ -549,207 +426,163 @@ def set_slot(conn, event_id, position_type, alliance_id, slot_index, fid, locked
     conn.execute(
         """UPDATE kvk_slots SET fid = ?, locked = ?
            WHERE event_id = ? AND position_type = ? AND alliance_id = ? AND slot_index = ?""",
-        (fid, locked, event_id, position_type, alliance_id, slot_index),
-    )
+        (fid, locked, event_id, position_type, alliance_id, slot_index))
     conn.commit()
+
+
+def get_locks(conn, event_id, position_type, alliance_id):
+    rows = conn.execute(
+        """SELECT slot_index, fid FROM kvk_slots
+           WHERE event_id = ? AND position_type = ? AND alliance_id = ? AND locked = 1 AND fid IS NOT NULL""",
+        (event_id, position_type, alliance_id)).fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 def get_slots(conn, event_id):
     rows = conn.execute(
         """SELECT position_type, alliance_id, slot_index, slot_time, fid, locked
            FROM kvk_slots WHERE event_id = ? ORDER BY position_type, alliance_id, slot_index""",
-        (event_id,),
-    ).fetchall()
+        (event_id,)).fetchall()
     keys = ("position_type", "alliance_id", "slot_index", "slot_time", "fid", "locked")
-    return [dict(zip(keys, r)) for r in rows]
+    return [dict(zip(keys, r, strict=True)) for r in rows]
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run — expect PASS**
 
-Run: `python -m pytest tests/test_kvk_db.py -q`
-Expected: PASS.
+Run: `python -m pytest tests/test_kvk_data.py -q`
 
-- [ ] **Step 5: Lint and commit**
+- [ ] **Step 5: Lint & commit**
 
 ```bash
-ruff check cogs/kvk_scheduling.py tests/test_kvk_db.py
-git add cogs/kvk_scheduling.py tests/test_kvk_db.py
+ruff check cogs/kvk_data.py tests/test_kvk_data.py
+git add cogs/kvk_data.py tests/test_kvk_data.py
 git commit -m "feat(kvk): db/kvk.sqlite schema and CRUD" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 5: Cog scaffold + `/kvk_create` wizard
+## Task 4: Cog scaffold + `/kvk_create` wizard (`cogs/kvk_scheduling.py`)
 
-**Files:**
-- Modify: `cogs/kvk_scheduling.py` (add the `KvkScheduling(commands.Cog)` class)
+**Files:** Create `cogs/kvk_scheduling.py`.
 
-**Interfaces:**
-- Consumes: the Task-4 data API, `POSITION_TYPES`.
-- Produces: `class KvkScheduling(commands.Cog)` with `self.conn` (a persistent `db/kvk.sqlite` connection opened in `__init__` via `init_schema`); an `async def setup(bot)` at module end that does `await bot.add_cog(KvkScheduling(bot))`. A Global-Admin check helper `_is_global_admin(interaction) -> bool` reused by later tasks.
+**Interfaces:** `class KvkScheduling(commands.Cog)` with `self.conn` (opened in `__init__`, `init_schema`); `_is_global_admin(interaction) -> bool`; module-end `async def setup(bot)`.
 
-- [ ] **Step 1: Add the cog class, admin check, and connection lifecycle**
+- [ ] **Step 1: Scaffold, imports (RELATIVE), admin check, lifecycle**
 
 ```python
+"""KvK scheduler cog: event lifecycle and self-service signup."""
+import contextlib
+import os
+import sqlite3
+from datetime import UTC, datetime
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from . import kvk_data as kvkdb
+from .kvk_util import POSITION_TYPES, parse_speedups
+from .permission_handler import PermissionManager
+
+DB_PATH = "db/kvk.sqlite"
+DT_FMT = "%Y-%m-%d %H:%M"
+
+
 class KvkScheduling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         os.makedirs("db", exist_ok=True)
         self.conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
-        init_schema(self.conn)
+        kvkdb.init_schema(self.conn)
 
     async def cog_unload(self):
-        try:
+        with contextlib.suppress(Exception):
             self.conn.close()
-        except Exception:
-            pass
 
     def _is_global_admin(self, interaction: discord.Interaction) -> bool:
-        # Mirror the project's existing Global-Admin gate used by minister_* commands.
-        settings = sqlite3.connect("db/settings.sqlite")
-        try:
-            row = settings.execute(
-                "SELECT 1 FROM admin WHERE id = ? AND is_initial = 1",
-                (interaction.user.id,),
-            ).fetchone()
-            return row is not None
-        finally:
-            settings.close()
+        is_admin, is_global = PermissionManager.is_admin(interaction.user.id)
+        return bool(is_admin and is_global)
+
+
+async def setup(bot):
+    await bot.add_cog(KvkScheduling(bot))
 ```
 
-Note: confirm the exact Global-Admin query against `cogs/permission_handler.py` before implementing — reuse that helper if one exists rather than duplicating SQL.
+Verify `PermissionManager.is_admin`'s exact return shape against `cogs/permission_handler.py:55` before wiring; adapt the unpack if it differs.
 
-- [ ] **Step 2: Add `/kvk_create` as a modal-driven wizard**
+- [ ] **Step 2: `/kvk_create` wizard**
 
-Implement `@app_commands.command(name="kvk_create")`. Because a single Discord modal is limited to 5 text inputs, collect core fields in one modal, then use a follow-up `discord.ui.View` with selects for `scope`, `slot_mode`, and the active position types + a per-type date modal. Concretely:
+`@app_commands.command(name="kvk_create")`, Global-Admin gated. Because one modal is capped at 5 inputs, split into: (a) `_KvkCreateModal` collecting `name`, `event_date` (`YYYY-MM-DD`), `signup_open_at` / `signup_close_at` (both `YYYY-MM-DD HH:MM` UTC — validate all with `datetime.strptime`; on bad format, ephemeral error, abort), `slots_per_alliance` (blank => kingdom scope); (b) a follow-up ephemeral `discord.ui.View` with a `slot_mode` select (0/1), a multi-select of `POSITION_TYPES` (active types), a `discord.ui.ChannelSelect` for the publish channel, and a per-active-type date modal (`type_date` = `YYYY-MM-DD`). Validation rules to enforce here:
+- If alliance scope: `slots_per_alliance` is a positive int `<= len(generate_time_slots(slot_mode))`; else error.
+On final confirm: `kvkdb.create_event(...)` → `event_id`; `kvkdb.set_event_types(event_id, [(type, type_date), ...])`; post an announcement embed **including the numeric `event_id`** in the chosen publish channel ("Run `/kvk_signup event_id:<id>`"). Build the wizard views following `cogs/minister_menu.py` / `cogs/notification_wizard.py` idioms. If the file exceeds ~600 lines, move views into `cogs/kvk_scheduling_views.py`.
 
-```python
-    @app_commands.command(name="kvk_create", description="Create a KvK event (Global Admin).")
-    async def kvk_create(self, interaction: discord.Interaction):
-        if not self._is_global_admin(interaction):
-            await interaction.response.send_message("Global Admin only.", ephemeral=True)
-            return
-        await interaction.response.send_modal(_KvkCreateModal(self))
-```
+- [ ] **Step 3: Manual verification** — `/kvk_create` as admin completes; `sqlite3 db/kvk.sqlite "SELECT id,name,scope,slot_mode,status FROM kvk_events;"` shows the row; announcement posted with the id. Non-admin → "Global Admin only". Bad date format → ephemeral error, no row. N greater than the grid → rejected.
 
-`_KvkCreateModal` collects: `name`, `event_date` (YYYY-MM-DD), `signup_open_at`, `signup_close_at`, `slots_per_alliance` (blank for kingdom). On submit, validate dates with `datetime.strptime`, then send an ephemeral `_KvkCreateOptions` view (selects: scope [alliance/kingdom], slot_mode [0/1], position types [multi]; a "Set dates & channel" button opens a modal for each chosen type's `type_date` and the publish channel). On final confirm, call `create_event(...)` + `set_event_types(...)`, then post an announcement embed in the publish channel telling players to run `/kvk_signup`.
-
-Full modal/view code is written during implementation following the existing modal/view patterns in `cogs/minister_menu.py` (e.g. `discord.ui.Modal`, `discord.ui.Select`, `discord.ui.Button`). Keep the file under ~600 lines; if it grows past that, split the wizard views into `cogs/kvk_scheduling_views.py`.
-
-- [ ] **Step 3: Manual verification**
-
-Run the bot locally against a test guild:
-- `/kvk_create` as a Global Admin → complete the wizard → verify a row appears: `sqlite3 db/kvk.sqlite "SELECT * FROM kvk_events;"` and the announcement is posted.
-- `/kvk_create` as a non-admin → verify "Global Admin only."
-
-- [ ] **Step 4: Lint and commit**
-
-```bash
-ruff check cogs/kvk_scheduling.py
-git add cogs/kvk_scheduling.py
-git commit -m "feat(kvk): /kvk_create wizard and cog scaffold" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
+- [ ] **Step 4: Lint & commit** (`ruff check cogs/kvk_scheduling.py`; commit `feat(kvk): /kvk_create wizard and cog scaffold`).
 
 ---
 
-## Task 6: `/kvk_signup` (self-service) + `/kvk_edit_signup`
+## Task 5: `/kvk_signup` (self-service) + `/kvk_edit_signup`
 
-**Files:**
-- Modify: `cogs/kvk_scheduling.py`
+**Files:** Modify `cogs/kvk_scheduling.py`.
 
-**Interfaces:**
-- Consumes: `parse_speedups`, `get_event`, `upsert_signup`, `POSITION_TYPES`; the existing `/register` link table `users(fid, discord_id, ...)` in `db/users.sqlite`.
-- Produces: `_fid_for_discord(discord_id) -> int | None` helper.
+**Interfaces:** `_fid_for_discord(discord_id) -> int | None`.
 
-- [ ] **Step 1: Add the fid-resolver helper**
+- [ ] **Step 1: fid resolver** (note: a user may have multiple registered fids; if `>1`, present a select so they pick — do not silently take the lowest)
 
 ```python
-    def _fid_for_discord(self, discord_id: int):
+    def _fids_for_discord(self, discord_id: int) -> list[int]:
         users = sqlite3.connect("db/users.sqlite")
         try:
-            row = users.execute(
-                "SELECT fid FROM users WHERE discord_id = ? ORDER BY fid LIMIT 1",
-                (discord_id,),
-            ).fetchone()
-            return row[0] if row else None
+            rows = users.execute("SELECT fid FROM users WHERE discord_id = ? ORDER BY fid", (discord_id,)).fetchall()
+            return [r[0] for r in rows]
         finally:
             users.close()
 ```
 
-- [ ] **Step 2: Implement `/kvk_signup`**
+- [ ] **Step 2: `/kvk_signup event_id:int`**
 
+Flow: resolve fids (empty → "run /register first"); `ev = kvkdb.get_event(self.conn, event_id)` (None or `status != 'collecting'` → "not open"); window check with parsed datetimes:
 ```python
-    @app_commands.command(name="kvk_signup", description="Submit your KvK positions and speedups.")
-    @app_commands.describe(event_id="KvK event id")
-    async def kvk_signup(self, interaction: discord.Interaction, event_id: int):
-        fid = self._fid_for_discord(interaction.user.id)
-        if fid is None:
-            await interaction.response.send_message(
-                "You are not registered. Run /register first.", ephemeral=True)
-            return
-        ev = get_event(self.conn, event_id)
-        if not ev or ev["status"] != "collecting":
-            await interaction.response.send_message("This event is not open for signups.", ephemeral=True)
-            return
-        now = datetime.now(UTC).isoformat()
-        if not (ev["signup_open_at"] <= now <= ev["signup_close_at"]):
-            await interaction.response.send_message("The signup window is closed.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "Pick your positions:", view=_SignupView(self, event_id, fid), ephemeral=True)
+now = datetime.now(UTC).strftime(DT_FMT)
+if not (ev["signup_open_at"] <= now <= ev["signup_close_at"]):
+    ...  # "signup window is closed"
 ```
+(All three are the pinned `YYYY-MM-DD HH:MM` UTC format, so lexicographic compare is valid.) Then show `_SignupView`: a multi-select whose options come from `kvkdb.get_active_types(self.conn, event_id)` (**active types only**, max 3). On selection open a modal with one speedup input per chosen type; on submit, `parse_speedups(value)` per type (ValueError → ephemeral error, write nothing), then `kvkdb.upsert_signup(self.conn, event_id, fid, ptype, minutes, interaction.user.id, datetime.now(UTC).strftime(DT_FMT))`.
 
-Add at the top of the file: `from datetime import datetime, timezone as _tz` and `UTC = _tz.utc` (or `from datetime import datetime, UTC` on py3.12). `_SignupView` shows a multi-select of `POSITION_TYPES` (max 3); on selection it opens a modal with one speedup text input per chosen type. On modal submit: `mins = parse_speedups(value)` for each (catch `ValueError` -> ephemeral error, write nothing), then `upsert_signup(self.conn, event_id, fid, ptype, mins, interaction.user.id, datetime.now(UTC).isoformat())` per type; confirm ephemerally.
+- [ ] **Step 3: `/kvk_edit_signup event_id:int fid:int`** — identical flow, Global-Admin gated, `submitted_by = interaction.user.id`, target `fid` from the parameter.
 
-- [ ] **Step 3: Implement `/kvk_edit_signup` (admin)**
+- [ ] **Step 4: Manual verification** — registered player signs up for two active types (`7d`, `70h`) → two rows with correct minutes; re-submit changes one → updated not duplicated; inactive type not offered; unregistered → register prompt; after close → "closed"; `abc` → parse error, no row.
 
-Same flow as `/kvk_signup` but takes an explicit `fid` parameter, requires `_is_global_admin`, and stamps `submitted_by = interaction.user.id`.
-
-- [ ] **Step 4: Manual verification**
-
-- Registered player: `/kvk_signup <event_id>` → choose Training + Research, enter `7d` and `70h` → verify two rows and minutes: `sqlite3 db/kvk.sqlite "SELECT fid,position_type,speedup_minutes FROM kvk_signups;"`.
-- Re-run and change Training to `10d` → verify the row updated (idempotent), not duplicated.
-- Unregistered user → "run /register first". Signup after `signup_close_at` → "window is closed".
-- Enter `abc` for speedups → ephemeral parse error, no row written.
-
-- [ ] **Step 5: Lint and commit**
-
-```bash
-ruff check cogs/kvk_scheduling.py
-git add cogs/kvk_scheduling.py
-git commit -m "feat(kvk): self-service /kvk_signup and admin /kvk_edit_signup" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
+- [ ] **Step 5: Lint & commit** (`feat(kvk): self-service signup + admin edit`).
 
 ---
 
-## Task 7: `/kvk_report` — rank, assign, editable preview
+## Task 6: `/kvk_report` — rank, assign, editable preview (`cogs/kvk_report.py`)
 
-**Files:**
-- Create: `cogs/kvk_report.py`
+**Files:** Create `cogs/kvk_report.py`.
 
-**Interfaces:**
-- Consumes: `rank_and_assign`, `generate_time_slots` (from `kvk_util`); `get_event`, `get_signups`, `save_slots`, `get_slots`, `set_slot`, `set_status` (from `kvk_scheduling`); `users.sqlite` for `fid -> alliance/nickname` (alliance compared as strings).
-- Produces: `class KvkReport(commands.Cog)`; `_compute_assignments(event_id)` that fills `kvk_slots` for every (scope-unit, active type).
+**Interfaces:** `class KvkReport(commands.Cog)`; `_compute(conn, event_id) -> bool`; `_render_embeds(conn, event_id) -> list[discord.Embed]`.
 
-- [ ] **Step 1: Implement the assignment driver**
+- [ ] **Step 1: Imports (RELATIVE) + assignment driver honoring locks**
 
 ```python
-"""KvK report: rank submissions, auto-assign slots, allow admin override, publish."""
+"""KvK report: rank submissions, auto-assign slots, admin override, publish."""
 import sqlite3
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-import kvk_scheduling as kvkdb
-from kvk_util import generate_time_slots, rank_and_assign
+from . import kvk_data as kvkdb
+from .kvk_util import generate_time_slots, rank_and_assign
 
 
-def _alliance_of(fid: int) -> str | None:
+def _alliance_of(fid: int):
     users = sqlite3.connect("db/users.sqlite")
     try:
         row = users.execute("SELECT alliance FROM users WHERE fid = ?", (fid,)).fetchone()
-        return str(row[0]) if row and row[0] is not None else None  # TEXT affinity: keep as str
+        return str(row[0]) if row and row[0] is not None else None  # TEXT affinity → keep str
     finally:
         users.close()
 
@@ -758,78 +591,56 @@ class KvkReport(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    def _compute(self, conn, event_id):
+    def _compute(self, conn, event_id) -> bool:
         ev = kvkdb.get_event(conn, event_id)
         if not ev:
             return False
-        types = [r["position_type"] for r in conn.execute(
-            "SELECT position_type FROM kvk_event_types WHERE event_id = ?", (event_id,)).fetchall()]
         slot_mode = ev["slot_mode"]
         full_day = len(generate_time_slots(slot_mode))
-        for ptype in types:
+        skipped = []
+        for ptype in kvkdb.get_active_types(conn, event_id):
             signups = kvkdb.get_signups(conn, event_id, ptype)
             if ev["scope"] == "kingdom":
-                rows = rank_and_assign(signups, full_day, slot_mode)
-                kvkdb.save_slots(conn, event_id, ptype, 0, rows)
+                locks = kvkdb.get_locks(conn, event_id, ptype, 0)
+                kvkdb.save_slots(conn, event_id, ptype, 0,
+                                 rank_and_assign(signups, full_day, slot_mode, locked=locks))
             else:
-                n = ev["slots_per_alliance"] or 0
                 by_all = {}
                 for s in signups:
                     aid = _alliance_of(s["fid"])
-                    if aid is None:
-                        continue  # orphan: excluded
-                    by_all.setdefault(aid, []).append(s)
-                for aid, group in by_all.items():
-                    rows = rank_and_assign(group, n, slot_mode)
-                    kvkdb.save_slots(conn, event_id, ptype, int(aid), rows)
+                    try:
+                        aid_int = int(aid) if aid is not None else None
+                    except ValueError:
+                        aid_int = None
+                    if aid_int is None:
+                        skipped.append(s["fid"])
+                        continue
+                    by_all.setdefault(aid_int, []).append(s)
+                n = ev["slots_per_alliance"] or 0
+                for aid_int, group in by_all.items():
+                    locks = kvkdb.get_locks(conn, event_id, ptype, aid_int)
+                    kvkdb.save_slots(conn, event_id, ptype, aid_int,
+                                     rank_and_assign(group, n, slot_mode, locked=locks))
         kvkdb.set_status(conn, event_id, "assigned")
+        self._skipped = skipped  # surfaced in the preview
         return True
 ```
 
-- [ ] **Step 2: Implement `/kvk_report` command + preview view**
+- [ ] **Step 2: `/kvk_report event_id:int`, render, override view**
 
-```python
-    @app_commands.command(name="kvk_report", description="Rank and assign KvK slots (Global Admin).")
-    async def kvk_report(self, interaction: discord.Interaction, event_id: int):
-        sched = self.bot.get_cog("KvkScheduling")
-        if sched is None or not sched._is_global_admin(interaction):
-            await interaction.response.send_message("Global Admin only.", ephemeral=True)
-            return
-        self._compute(sched.conn, event_id)
-        embed = self._render(sched.conn, event_id)
-        await interaction.response.send_message(
-            embed=embed, view=_OverrideView(self, sched, event_id), ephemeral=True)
-```
+Global-Admin gated (`sched = self.bot.get_cog("KvkScheduling")`; `sched._is_global_admin(interaction)`). If `_compute` returns False → ephemeral "unknown event". `_render_embeds` builds **one embed per position type** (kingdom 48/49 lines and alliance-grouped lists exceed the 4096-char/embed and 1024-char/field limits, so never put everything in one embed; page long alliance lists into ≤1024-char fields or multiple messages). Each line: `slot_time — nickname (fid) — {Xh Ym}` (speedups from `kvkdb.get_signup_minutes`), `🔒` if locked, `— empty —` for `fid is None`; append a "⚠️ Skipped (no alliance): …" line if `self._skipped`. Nicknames from `users.sqlite`. `_OverrideView` buttons: **Group select** (pick position_type + alliance) then **Swap** (two indices), **Lock/Unlock** (`set_slot(..., locked=toggle)`), **Clear** (`set_slot(..., fid=None, locked=0)`), **Re-run** (`_compute` — locks now persist via `get_locks`), **Publish** (Task 7).
 
-`_render(conn, event_id)` builds an embed grouping `get_slots` by `position_type` then `alliance_id`, each line `slot_time — nickname (fid) [Xh]` or `— empty —`, with a lock marker. `_OverrideView` offers buttons: **Swap** (modal: two slot indices within a group), **Lock/Unlock** (toggle `locked` via `set_slot`), **Clear slot** (`set_slot fid=None`), **Re-run** (`_compute`, honoring locked rows — see note), and **Publish** (delegates to Task 8). Nicknames come from `users.sqlite`.
+- [ ] **Step 3: Manual verification** — alliance scope N=2, two alliances seeded: each alliance's top-2 fill, ties by earlier submit, empty when <2, skipped-note when a signup's fid has no alliance. Kingdom scope: 48/49 and kingdom-wide ranking. Lock a slot, Re-run → locked fid stays. Unknown event id → error.
 
-Note on re-run honoring locks: `_compute` must read existing locked rows first and pass them as `locked={slot_index: fid}` into `rank_and_assign` per group (extend `_compute` to load locks before overwriting). Implement this in Step 1's function once the override view exists.
-
-- [ ] **Step 3: Manual verification**
-
-- Seed signups across two alliances (alliance scope, N=2). Run `/kvk_report` → verify each alliance's top-2 by speedups fill slots, ties broken by earlier submit, empty slots shown when <2.
-- Switch a test event to kingdom scope → verify 48 (mode 0) / 49 (mode 1) slots and kingdom-wide ranking.
-- Lock a slot, Re-run → verify the locked fid stays put.
-
-- [ ] **Step 4: Lint and commit**
-
-```bash
-ruff check cogs/kvk_report.py
-git add cogs/kvk_report.py
-git commit -m "feat(kvk): /kvk_report ranking, assignment, and override preview" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
+- [ ] **Step 4: Lint & commit** (`feat(kvk): /kvk_report ranking, assignment, override`).
 
 ---
 
-## Task 8: `/kvk_publish`
+## Task 7: `/kvk_publish` (`cogs/kvk_report.py`)
 
-**Files:**
-- Modify: `cogs/kvk_report.py`
+**Files:** Modify `cogs/kvk_report.py`.
 
-**Interfaces:**
-- Consumes: `get_event`, `get_slots`, `set_status`; `publish_channel_id`.
-
-- [ ] **Step 1: Implement publish**
+- [ ] **Step 1: Publish**
 
 ```python
     @app_commands.command(name="kvk_publish", description="Publish the KvK schedule (Global Admin).")
@@ -839,81 +650,57 @@ git commit -m "feat(kvk): /kvk_report ranking, assignment, and override preview"
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
         ev = kvkdb.get_event(sched.conn, event_id)
-        if not ev or not ev["publish_channel_id"]:
+        if not ev or ev["status"] not in ("assigned", "published"):
+            await interaction.response.send_message("Run /kvk_report first.", ephemeral=True)
+            return
+        if not ev["publish_channel_id"]:
             await interaction.response.send_message("No publish channel set.", ephemeral=True)
             return
         channel = self.bot.get_channel(int(ev["publish_channel_id"]))
         if channel is None:
-            await interaction.response.send_message("Publish channel not found.", ephemeral=True)
-            return
-        embed = self._render(sched.conn, event_id)
-        embed.title = f"KvK Schedule — {ev['name']}"
-        await channel.send(embed=embed)
+            channel = await self.bot.fetch_channel(int(ev["publish_channel_id"]))
+        await interaction.response.defer(ephemeral=True)
+        for embed in self._render_embeds(sched.conn, event_id):
+            await channel.send(embed=embed)
         kvkdb.set_status(sched.conn, event_id, "published")
-        await interaction.response.send_message("Published.", ephemeral=True)
+        await interaction.followup.send("Published.", ephemeral=True)
 ```
 
-- [ ] **Step 2: Manual verification**
+- [ ] **Step 2: Manual verification** — publish before report → "Run /kvk_report first"; after report → embeds appear in channel, status `published`; deleted/uncached channel handled by `fetch_channel`.
 
-- `/kvk_publish <event_id>` → the schedule embed appears in the configured channel; `SELECT status FROM kvk_events` shows `published`.
-- Missing/invalid channel → friendly ephemeral error, nothing posted.
-
-- [ ] **Step 3: Lint and commit**
-
-```bash
-ruff check cogs/kvk_report.py
-git add cogs/kvk_report.py
-git commit -m "feat(kvk): /kvk_publish schedule to channel" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
+- [ ] **Step 3: Lint & commit** (`feat(kvk): /kvk_publish`).
 
 ---
 
-## Task 9: Register cogs + full smoke test
+## Task 8: Register cogs + full smoke test
 
-**Files:**
-- Modify: the loader that `load_extension`s cogs (find via `grep -rn "load_extension" main.py cogs`).
+**Files:** Modify `main.py` (cog list at `main.py:1499`).
 
-**Interfaces:** none new.
-
-- [ ] **Step 1: Add `setup()` hooks**
-
-Ensure each cog file ends with:
+- [ ] **Step 1: Register** — add bare names to the loader list (it prepends `cogs.`):
 
 ```python
-async def setup(bot):
-    await bot.add_cog(KvkScheduling(bot))   # kvk_scheduling.py
+    "kvk_scheduling",
+    "kvk_report",
 ```
-```python
-async def setup(bot):
-    await bot.add_cog(KvkReport(bot))       # kvk_report.py
-```
+Confirm the auto-loader (if any) skips `kvk_util.py` / `kvk_data.py` (no `setup`); `kvk_report.py` needs its own `async def setup(bot): await bot.add_cog(KvkReport(bot))`.
 
-If the loader auto-discovers `cogs/*.py`, confirm `kvk_util.py` (no cog) is skipped or has no `setup`. If the loader uses an explicit list, add `cogs.kvk_scheduling` and `cogs.kvk_report`.
+- [ ] **Step 2: Full local smoke test** (OCR-free venv): boot, confirm no import error and both cogs load, `/kvk_*` appear after sync; walk create → signup (2 players) → report → override → publish; verify `db/kvk.sqlite` rows in all four tables.
 
-- [ ] **Step 2: Full local smoke test**
-
-Boot the bot with the OCR-free venv. Verify in logs: modules loaded count increased and no import error; `/kvk_*` commands appear after sync. Walk the end-to-end flow: create → signup (2 players) → report → override → publish. Confirm `db/kvk.sqlite` has rows in all four tables.
-
-- [ ] **Step 3: Run the whole test suite + lint**
+- [ ] **Step 3: Whole suite + lint**
 
 ```bash
 python -m pytest tests/ -q
-ruff check cogs/kvk_util.py cogs/kvk_scheduling.py cogs/kvk_report.py tests/
+ruff check cogs/kvk_util.py cogs/kvk_data.py cogs/kvk_scheduling.py cogs/kvk_report.py tests/
 ```
-Expected: all tests PASS, ruff clean.
+Expected: all PASS, ruff clean.
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add -A
-git commit -m "feat(kvk): register KvK cogs in the loader" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
-```
+- [ ] **Step 4: Commit** (`feat(kvk): register KvK cogs in the loader`).
 
 ---
 
 ## Notes for the implementer
 
-- Do NOT edit `minister_*`. KvK is isolated; only the cog loader is touched.
-- Follow existing modal/view idioms in `cogs/minister_menu.py` and `cogs/notification_wizard.py` for the wizard/preview UI.
-- Discord UI cannot be unit-tested here; Tasks 5-8 rely on manual verification. The deterministic core (Tasks 1-4) carries the automated tests — keep all logic that can live in `kvk_util`/the data layer there, not in the cogs.
-- After each task, the branch must stay green: `python -m pytest tests/ -q` and `ruff check` on changed files.
+- Do NOT edit `minister_*`. Only `main.py`'s cog list is touched.
+- Discord UI (Tasks 4–7) can't be unit-tested here — they rely on manual verification. All testable logic lives in `kvk_util` / `kvk_data` (Tasks 1–3, full pytest). Keep it that way: no ranking/SQL logic inside the cogs.
+- After every task the branch stays green: `python -m pytest tests/ -q` and `ruff check` on changed files.
+- Spec deltas ratified by validation: tests use `pytest` under `tests/` (supersedes spec §12's `kvk_selfcheck.py`); event `status` starts at `'collecting'` (spec §4's `'draft'` state is unused).

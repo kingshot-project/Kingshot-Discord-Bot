@@ -226,7 +226,7 @@ class KvkReport(commands.Cog):
         """
         ev = kvkdb.get_event(conn, event_id)
         if not ev or ev["status"] not in ("assigned", "published"):
-            await interaction.response.send_message("Run /kvk_report first.", ephemeral=True)
+            await interaction.response.send_message("Assign the schedule first (Report).", ephemeral=True)
             return
         if not ev["publish_channel_id"]:
             await interaction.response.send_message("No publish channel set.", ephemeral=True)
@@ -244,9 +244,8 @@ class KvkReport(commands.Cog):
         kvkdb.set_status(conn, event_id, "published")
         await interaction.followup.send("Published.", ephemeral=True)
 
-    @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
-    @app_commands.describe(event_id="The KvK event ID")
-    async def kvk_report(self, interaction: discord.Interaction, event_id: int):
+    async def launch_report(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Rank, assign, and show the override view. Shared by /kvk_report and the /settings KvK menu."""
         sched = self.bot.get_cog("KvkScheduling")
         if sched is None or not sched._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
@@ -268,14 +267,23 @@ class KvkReport(commands.Cog):
         if not view.groups:
             await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
 
-    @app_commands.command(name="kvk_publish", description="Publish the KvK schedule (Global Admin only).")
-    @app_commands.describe(event_id="The KvK event ID")
-    async def kvk_publish(self, interaction: discord.Interaction, event_id: int):
+    async def launch_publish(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Publish the schedule. Shared by /kvk_publish and the /settings KvK menu."""
         sched = self.bot.get_cog("KvkScheduling")
         if sched is None or not sched._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
         await self._publish(interaction, sched.conn, event_id)
+
+    @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
+    @app_commands.describe(event_id="The KvK event ID")
+    async def kvk_report(self, interaction: discord.Interaction, event_id: int):
+        await self.launch_report(interaction, event_id)
+
+    @app_commands.command(name="kvk_publish", description="Publish the KvK schedule (Global Admin only).")
+    @app_commands.describe(event_id="The KvK event ID")
+    async def kvk_publish(self, interaction: discord.Interaction, event_id: int):
+        await self.launch_publish(interaction, event_id)
 
 
 class _GroupSelect(discord.ui.Select):

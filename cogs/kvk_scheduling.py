@@ -11,11 +11,13 @@ from discord.ext import commands
 from . import kvk_data as kvkdb
 from .kvk_util import POSITION_TYPES, generate_time_slots, parse_speedups
 from .permission_handler import PermissionManager
+from .pimp_my_bot import safe_edit_message, theme
 
 DB_PATH = "db/kvk.sqlite"
 DATE_FMT = "%Y-%m-%d"
 DT_FMT = "%Y-%m-%d %H:%M"
 VIEW_TIMEOUT = 7200
+_MAX_EVENT_OPTIONS = 25  # Discord caps a select at 25 options
 
 
 class KvkScheduling(commands.Cog):
@@ -42,8 +44,8 @@ class KvkScheduling(commands.Cog):
         finally:
             users.close()
 
-    @app_commands.command(name="kvk_create", description="Start the KvK event setup wizard (Global Admin only).")
-    async def kvk_create(self, interaction: discord.Interaction):
+    async def launch_create(self, interaction: discord.Interaction) -> None:
+        """Open the create wizard. Shared by /kvk_create and the /settings KvK menu."""
         if not self._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
@@ -51,6 +53,19 @@ class KvkScheduling(commands.Cog):
             await interaction.response.send_message("Use this command in a server, not a DM.", ephemeral=True)
             return
         await interaction.response.send_modal(_KvkCreateModal(self))
+
+    @app_commands.command(name="kvk_create", description="Start the KvK event setup wizard (Global Admin only).")
+    async def kvk_create(self, interaction: discord.Interaction):
+        await self.launch_create(interaction)
+
+    async def show_kvk_menu(self, interaction: discord.Interaction):
+        """Entry point for the /settings KvK Scheduling button (Global Admin only)."""
+        if not self._is_global_admin(interaction):
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Scheduling is Global Admin only.", ephemeral=True)
+            return
+        view = _KvkMenuView(self, interaction.guild_id)
+        await safe_edit_message(interaction, embed=view.build_embed(), view=view, content=None)
 
     @app_commands.command(name="kvk_signup", description="Sign up for a KvK event (any registered player).")
     @app_commands.describe(event_id="The KvK event ID")
@@ -476,6 +491,153 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
         types_text = ", ".join(f"{position_type}: {minutes}m" for position_type, minutes in parsed.items())
         await interaction.response.send_message(
             f"Signup saved for fid {self.fid}: {types_text}", ephemeral=True)
+
+
+class _KvkEventSelect(discord.ui.Select):
+    def __init__(self, menu_view: "_KvkMenuView", events: list):
+        options = [
+            discord.SelectOption(
+                label=e["name"][:100],
+                value=str(e["id"]),
+                description=f"{e['event_date']} - {e['scope']} - {e['status']}"[:100],
+                default=(e["id"] == menu_view.selected_event_id),
+            )
+            for e in events
+        ]
+        super().__init__(placeholder="Pick an event", options=options, min_values=1, max_values=1, row=0)
+        self.menu_view = menu_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.menu_view.selected_event_id = int(self.values[0])
+        await safe_edit_message(interaction, embed=self.menu_view.build_embed(), view=self.menu_view)
+
+
+class _EditSignupModal(discord.ui.Modal, title="Edit a KvK Signup"):
+    """Asks for a player's fid, then opens the admin signup editor for that fid."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int):
+        super().__init__()
+        self.cog = cog
+        self.event_id = event_id
+        self.fid_input = discord.ui.TextInput(label="Player fid", max_length=20)
+        self.add_item(self.fid_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            fid = int(self.fid_input.value.strip())
+        except ValueError:
+            await interaction.response.send_message("The fid must be a whole number.", ephemeral=True)
+            return
+        await self.cog._start_signup(interaction, self.event_id, fid, admin_override=True)
+
+
+class _KvkMenuView(discord.ui.View):
+    """The /settings KvK sub-menu: pick an event, then create, report, publish, or edit signups."""
+
+    def __init__(self, cog: KvkScheduling, guild_id: int):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.selected_event_id: int | None = None
+        self.events: list = []
+        self._build_items()
+
+    def _build_items(self) -> None:
+        """(Re)build the components from the current event set. The event select and the actions
+        that need a selected event only appear when at least one event exists (Discord needs 1-25
+        select options)."""
+        self.clear_items()
+        self.events = kvkdb.list_events(self.cog.conn, self.guild_id)
+        if self.selected_event_id not in {e["id"] for e in self.events}:
+            self.selected_event_id = None
+
+        if self.events:
+            self.add_item(_KvkEventSelect(self, self.events[:_MAX_EVENT_OPTIONS]))
+
+        create_button = discord.ui.Button(
+            label="Create Event", emoji=theme.addIcon, style=discord.ButtonStyle.success, row=1)
+        create_button.callback = self.create
+        self.add_item(create_button)
+
+        if self.events:
+            report_button = discord.ui.Button(label="Report / Assign", style=discord.ButtonStyle.primary, row=1)
+            report_button.callback = self.report
+            self.add_item(report_button)
+
+            publish_button = discord.ui.Button(label="Publish", style=discord.ButtonStyle.secondary, row=1)
+            publish_button.callback = self.publish
+            self.add_item(publish_button)
+
+            edit_button = discord.ui.Button(label="Edit a Signup", style=discord.ButtonStyle.secondary, row=1)
+            edit_button.callback = self.edit_signup
+            self.add_item(edit_button)
+
+    @property
+    def truncated(self) -> bool:
+        return len(self.events) > _MAX_EVENT_OPTIONS
+
+    def build_embed(self) -> discord.Embed:
+        actions = "\n".join([
+            f"{theme.addIcon} **Create Event** - start the setup wizard",
+            f"{theme.chartIcon} **Report / Assign** - rank signups and place slots",
+            f"{theme.announceIcon} **Publish** - post the schedule to its channel",
+            f"{theme.editListIcon} **Edit a Signup** - fix one player's speedups",
+        ])
+        if self.selected_event_id is not None:
+            name = next(
+                (e["name"] for e in self.events if e["id"] == self.selected_event_id),
+                str(self.selected_event_id))
+            selected = f"Selected event: **{name}** (id {self.selected_event_id})"
+        elif self.events:
+            selected = "Pick an event from the dropdown, then use Report / Publish / Edit."
+        else:
+            selected = "No events yet. Use Create Event to make one."
+        description = (
+            f"Players sign up with `/kvk_signup`. Admin actions:\n\n"
+            f"{actions}\n\n"
+            f"{theme.upperDivider}\n{selected}"
+        )
+        if self.truncated:
+            description += f"\n\nShowing the newest {_MAX_EVENT_OPTIONS} of {len(self.events)} events."
+        return discord.Embed(
+            title=f"{theme.crossIcon} KvK Scheduling", description=description, color=discord.Color.blue())
+
+    async def _require_event(self, interaction: discord.Interaction) -> bool:
+        if self.selected_event_id is None:
+            await interaction.response.send_message("Pick an event first.", ephemeral=True)
+            return False
+        return True
+
+    def _report_cog(self):
+        return self.cog.bot.get_cog("KvkReport")
+
+    async def create(self, interaction: discord.Interaction):
+        await self.cog.launch_create(interaction)
+
+    async def report(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        report_cog = self._report_cog()
+        if report_cog is None:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
+            return
+        await report_cog.launch_report(interaction, self.selected_event_id)
+
+    async def publish(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        report_cog = self._report_cog()
+        if report_cog is None:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
+            return
+        await report_cog.launch_publish(interaction, self.selected_event_id)
+
+    async def edit_signup(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        await interaction.response.send_modal(_EditSignupModal(self.cog, self.selected_event_id))
 
 
 async def setup(bot):

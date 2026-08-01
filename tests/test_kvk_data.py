@@ -36,6 +36,28 @@ def test_signup_upsert_idempotent():
     assert kvk.get_signups(c, eid, "Training") == [{"fid": 100, "speedup_minutes": 900, "submitted_at": "t2"}]
 
 
+def test_list_events_scoped_to_guild_newest_first():
+    c = _conn()
+    e1 = kvk.create_event(
+        c, guild_id=10, name="First", event_date="2026-09-01", scope="kingdom",
+        slots_per_alliance=None, slot_mode=0, signup_open_at="a", signup_close_at="b",
+        publish_channel_id=None, created_by=1, created_at="c",
+    )
+    e2 = kvk.create_event(
+        c, guild_id=10, name="Second", event_date="2026-09-02", scope="alliance",
+        slots_per_alliance=3, slot_mode=0, signup_open_at="a", signup_close_at="b",
+        publish_channel_id=None, created_by=1, created_at="c",
+    )
+    kvk.create_event(
+        c, guild_id=99, name="Other guild", event_date="2026-09-03", scope="kingdom",
+        slots_per_alliance=None, slot_mode=0, signup_open_at="a", signup_close_at="b",
+        publish_channel_id=None, created_by=1, created_at="c",
+    )
+    events = kvk.list_events(c, 10)
+    assert [e["id"] for e in events] == [e2, e1]  # newest first, other guild excluded
+    assert events[0]["name"] == "Second" and events[0]["scope"] == "alliance"
+
+
 def test_slots_save_override_and_locks():
     c = _conn()
     eid = kvk.create_event(

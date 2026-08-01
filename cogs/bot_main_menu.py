@@ -118,6 +118,8 @@ class MainMenu(commands.Cog):
                 f"└ Track bear hunt damage and view statistics\n\n"
                 f"{theme.ministerIcon} **Minister Scheduling**\n"
                 f"└ Manage state minister appointments\n\n"
+                f"{theme.crossIcon} **KvK Scheduling**\n"
+                f"└ Rank speedups and assign minister slots for KvK\n\n"
                 f"{theme.paletteIcon} **Themes**\n"
                 f"└ Customize bot icons and colors\n\n"
                 f"{theme.lockIcon} **Permissions**\n"
@@ -451,7 +453,7 @@ class MainMenu(commands.Cog):
 # ============================================================================
 
 class MainMenuView(discord.ui.View):
-    """Main menu with 8 category buttons."""
+    """Main menu with 10 category buttons."""
 
     def __init__(self, cog):
         super().__init__(timeout=None)
@@ -571,6 +573,27 @@ class MainMenuView(discord.ui.View):
         except Exception as e:
             logger.error(f"Error loading Minister menu: {e}")
             print(f"Error loading Minister menu: {e}")
+
+    @discord.ui.button(
+        label="KvK Scheduling",
+        emoji=theme.crossIcon,
+        style=discord.ButtonStyle.primary,
+        custom_id="kvk_scheduling",
+        row=1
+    )
+    async def kvk_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            kvk_cog = self.cog.bot.get_cog("KvkScheduling")
+            if kvk_cog:
+                await kvk_cog.show_kvk_menu(interaction)
+            else:
+                await interaction.response.send_message(
+                    f"{theme.deniedIcon} KvK Scheduling module not found.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"Error loading KvK menu: {e}")
+            print(f"Error loading KvK menu: {e}")
 
     @discord.ui.button(
         label="Themes",

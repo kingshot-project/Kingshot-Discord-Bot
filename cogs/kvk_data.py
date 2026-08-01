@@ -69,6 +69,15 @@ def get_event(conn, event_id):
     return dict(zip(_EVENT_COLS, row, strict=True)) if row else None
 
 
+def list_events(conn, guild_id):
+    """All events for one guild, newest first. Used by the /settings KvK menu picker."""
+    rows = conn.execute(
+        "SELECT id, name, event_date, scope, status FROM kvk_events WHERE guild_id = ? ORDER BY id DESC",
+        (guild_id,)).fetchall()
+    keys = ("id", "name", "event_date", "scope", "status")
+    return [dict(zip(keys, r, strict=True)) for r in rows]
+
+
 def set_status(conn, event_id, status) -> None:
     conn.execute("UPDATE kvk_events SET status = ? WHERE id = ?", (status, event_id))
     conn.commit()

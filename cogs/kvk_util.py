@@ -1,4 +1,5 @@
 """Pure, dependency-free helpers for the KvK scheduler (no discord/sqlite imports)."""
+import math
 import re
 from datetime import datetime, timedelta
 
@@ -76,6 +77,8 @@ def parse_troop_count(text: str) -> int:
         value = float(s) * mult
     except ValueError:
         raise ValueError(f"could not parse troop count: {text!r}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"troop count is not a finite number: {text!r}")
     if value < 0:
         raise ValueError(f"troop count cannot be negative: {text!r}")
     return int(value)

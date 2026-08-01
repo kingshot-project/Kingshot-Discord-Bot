@@ -637,7 +637,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             text="Upgrade from level (optional)",
             component=discord.ui.Select(
                 options=[discord.SelectOption(label=f"T{n}", value=str(n)) for n in range(1, 11)],
-                min_values=0, max_values=1))
+                required=False, min_values=0, max_values=1))
         self.add_item(self.upgrade)
         self.count = discord.ui.Label(
             text="Upgrade count (optional)", description="troops to upgrade, e.g. 900k",
@@ -661,6 +661,16 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         upgrade_from = int(upgrade_vals[0]) if upgrade_vals else None
         try:
             upgrade_count = parse_troop_count(self.count.component.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not read the upgrade count. Use a number like '900k'.", ephemeral=True)
+            return
+        if (upgrade_from is None) != (upgrade_count == 0):
+            await interaction.response.send_message(
+                "For an upgrade, set BOTH the upgrade level and the count, or leave both blank.",
+                ephemeral=True)
+            return
+        try:
             result = compute_training_points(base_tier, hours_minutes, upgrade_from, upgrade_count)
         except ValueError as exc:
             await interaction.response.send_message(f"{exc}. Fix and try again.", ephemeral=True)

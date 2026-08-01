@@ -461,7 +461,7 @@ class KvkReport(commands.Cog):
         message = (
             f"Run Report / Assign for '{ev['name']}'?\n\n"
             f"What this does:\n"
-            f"- ranks every signup by speedups and fills the slots\n"
+            f"- ranks every signup (by speedups, or KvK points in Pro mode) and fills the slots\n"
             f"{gate_line}"
             f"- opens the override panel (swap / lock / clear / publish)\n\n"
             f"You can re-run it from that panel; signups do not reopen."

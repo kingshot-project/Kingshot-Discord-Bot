@@ -52,7 +52,7 @@ def test_parse_troop_count_ok(text, count):
     assert parse_troop_count(text) == count
 
 
-@pytest.mark.parametrize("bad", ["abc", "-5", "1..5k"])
+@pytest.mark.parametrize("bad", ["abc", "-5", "1..5k", "inf", "1e999", "nan"])
 def test_parse_troop_count_bad(bad):
     with pytest.raises(ValueError):
         parse_troop_count(bad)

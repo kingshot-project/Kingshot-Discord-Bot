@@ -359,20 +359,45 @@ class KvkReport(commands.Cog):
         await interaction.followup.send("Published.", ephemeral=True)
 
     async def launch_report(self, interaction: discord.Interaction, event_id: int) -> None:
-        """Rank, assign, and show the override view. Shared by /kvk_report and the /settings KvK menu."""
+        """Confirm the consequences, then rank + assign. Shared by /kvk_report and the KvK menu."""
         sched = self.bot.get_cog("KvkScheduling")
         if sched is None or not sched._is_global_admin(interaction):
             await interaction.response.send_message("Global Admin only.", ephemeral=True)
             return
-        if not self._compute(sched.conn, event_id):
+        ev = kvkdb.get_event(sched.conn, event_id)
+        if ev is None:
             await interaction.response.send_message(f"Unknown event: {event_id}.", ephemeral=True)
             return
+        if ev["status"] == "collecting":
+            gate_line = ('- CLOSES signups: the event moves from "collecting" to "assigned", '
+                         'so /kvk_signup stops accepting entries for it\n')
+        else:
+            gate_line = f"- signups are already closed (status: {ev['status']})\n"
+        message = (
+            f"Run Report / Assign for '{ev['name']}'?\n\n"
+            f"What this does:\n"
+            f"- ranks every signup by speedups and fills the slots\n"
+            f"{gate_line}"
+            f"- opens the override panel (swap / lock / clear / publish)\n\n"
+            f"You can re-run it from that panel; signups do not reopen."
+        )
+        await interaction.response.send_message(
+            message, view=_ConfirmReportView(self, event_id), ephemeral=True)
 
+    async def _run_report(self, interaction: discord.Interaction, event_id: int, *, edit: bool) -> None:
+        """Compute the ranking and show the override view. `edit` replaces the confirm message in place."""
+        sched = self.bot.get_cog("KvkScheduling")
+        if sched is None or not self._compute(sched.conn, event_id):
+            await interaction.response.send_message(f"Unknown event: {event_id}.", ephemeral=True)
+            return
         ev = kvkdb.get_event(sched.conn, event_id)
         embeds = self._render_embeds(sched.conn, event_id)
         view = _OverrideView(self, sched.conn, event_id, ev["scope"])
-        await interaction.response.send_message(
-            embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], view=view, ephemeral=True)
+        first = embeds[:_MAX_EMBEDS_PER_MESSAGE]
+        if edit:
+            await interaction.response.edit_message(content=None, embeds=first, view=view)
+        else:
+            await interaction.response.send_message(embeds=first, view=view, ephemeral=True)
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
         if view.truncated:
@@ -600,6 +625,27 @@ class _OverrideView(discord.ui.View):
 
     async def publish(self, interaction: discord.Interaction):
         await self.report_cog._confirm_publish(interaction, self.conn, self.event_id)
+
+
+class _ConfirmReportView(discord.ui.View):
+    """A Yes/Cancel gate before Report / Assign, which closes signups on the first run."""
+
+    def __init__(self, report_cog: KvkReport, event_id: int):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.report_cog = report_cog
+        self.event_id = event_id
+        yes_button = discord.ui.Button(label="Yes, run it", style=discord.ButtonStyle.primary)
+        yes_button.callback = self.confirm
+        self.add_item(yes_button)
+        cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel_button.callback = self.cancel
+        self.add_item(cancel_button)
+
+    async def confirm(self, interaction: discord.Interaction):
+        await self.report_cog._run_report(interaction, self.event_id, edit=True)
+
+    async def cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(content="Report cancelled.", view=None)
 
 
 class _ConfirmPublishView(discord.ui.View):

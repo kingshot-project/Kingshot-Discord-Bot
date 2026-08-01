@@ -148,7 +148,7 @@ class KvkScheduling(commands.Cog):
 
         view = _SignupTypesView(self, event_id, fid, active_types)
         await self._send_or_edit(
-            interaction, "Pick position types to sign up for (up to 3), then submit speedups.",
+            interaction, "Pick position types to sign up for (up to 3), then press Enter speedups.",
             view=view, edit=edit)
 
     @staticmethod
@@ -469,26 +469,41 @@ class _EventSignupSelectView(discord.ui.View):
 
 
 class _SignupTypeSelect(discord.ui.Select):
-    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, active_types: list[str]):
+    def __init__(self, types_view: "_SignupTypesView", active_types: list[str]):
         options = [discord.SelectOption(label=t, value=t) for t in active_types]
         super().__init__(
             placeholder="Pick position types (up to 3)", options=options,
             min_values=1, max_values=min(3, len(active_types)))
-        self.cog = cog
-        self.event_id = event_id
-        self.fid = fid
+        self.types_view = types_view
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(
-            _SignupSpeedupModal(self.cog, self.event_id, self.fid, list(self.values)))
+        self.types_view.selected_types = list(self.values)
+        await interaction.response.edit_message(
+            content=f"Picked: {', '.join(self.types_view.selected_types)}. "
+                    f"Press Enter speedups to submit your times.",
+            view=self.types_view)
 
 
 class _SignupTypesView(discord.ui.View):
-    """Step 1 of signup: pick which active position types to submit speedups for."""
+    """Step 1 of signup: pick position types, then press Enter speedups to open the modal."""
 
     def __init__(self, cog: KvkScheduling, event_id: int, fid: int, active_types: list[str]):
         super().__init__(timeout=VIEW_TIMEOUT)
-        self.add_item(_SignupTypeSelect(cog, event_id, fid, active_types))
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.selected_types: list[str] = []
+        self.add_item(_SignupTypeSelect(self, active_types))
+        enter_button = discord.ui.Button(label="Enter speedups", style=discord.ButtonStyle.primary)
+        enter_button.callback = self.enter_speedups
+        self.add_item(enter_button)
+
+    async def enter_speedups(self, interaction: discord.Interaction):
+        if not self.selected_types:
+            await interaction.response.send_message("Pick at least one position type first.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            _SignupSpeedupModal(self.cog, self.event_id, self.fid, self.selected_types))
 
 
 class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):

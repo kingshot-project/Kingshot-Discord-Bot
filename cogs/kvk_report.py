@@ -26,6 +26,15 @@ def _alliance_of(fid: int):
         users.close()
 
 
+def _alliance_id_of(fid: int):
+    """Resolve fid to an int alliance id, or None if unknown/non-numeric (an orphan)."""
+    aid = _alliance_of(fid)
+    try:
+        return int(aid) if aid is not None else None
+    except ValueError:
+        return None
+
+
 def _nicknames_for(fids: set) -> dict:
     """Batch-look-up nicknames for a set of fids. One query instead of one per fid."""
     if not fids:
@@ -58,6 +67,23 @@ def _distinct_groups(conn, event_id) -> list:
         key = (row["position_type"], row["alliance_id"])
         seen.setdefault(key, None)
     return list(seen)
+
+
+def _skipped_fids(conn, event_id, ev: dict) -> list:
+    """Signed-up fids with no resolvable alliance, for alliance-scope events.
+
+    Recomputed fresh from current signup data on every call (not cached on the cog), so it is
+    always scoped to the one event being rendered and stays correct after Swap/Lock/Unlock/Clear
+    refreshes that do not re-run _compute.
+    """
+    if ev["scope"] != "alliance":
+        return []
+    skipped = []
+    for position_type in kvkdb.get_active_types(conn, event_id):
+        for s in kvkdb.get_signups(conn, event_id, position_type):
+            if _alliance_id_of(s["fid"]) is None:
+                skipped.append(s["fid"])
+    return skipped
 
 
 def _chunk_lines(lines: list, limit: int) -> list:
@@ -131,7 +157,6 @@ def _type_embeds(ev: dict, position_type: str, rows: list, minutes_map: dict, ni
 class KvkReport(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._skipped: list = []
 
     def _compute(self, conn, event_id) -> bool:
         """Rank signups and auto-assign slots for every active type, honoring existing locks."""
@@ -140,7 +165,6 @@ class KvkReport(commands.Cog):
             return False
         slot_mode = ev["slot_mode"]
         full_day = len(generate_time_slots(slot_mode))
-        skipped: list = []
         for position_type in kvkdb.get_active_types(conn, event_id):
             signups = kvkdb.get_signups(conn, event_id, position_type)
             if ev["scope"] == "kingdom":
@@ -151,14 +175,9 @@ class KvkReport(commands.Cog):
             else:
                 by_alliance: dict = {}
                 for s in signups:
-                    aid = _alliance_of(s["fid"])
-                    try:
-                        aid_int = int(aid) if aid is not None else None
-                    except ValueError:
-                        aid_int = None
+                    aid_int = _alliance_id_of(s["fid"])
                     if aid_int is None:
-                        skipped.append(s["fid"])
-                        continue
+                        continue  # orphan: no alliance, or non-numeric alliance id
                     by_alliance.setdefault(aid_int, []).append(s)
                 n = ev["slots_per_alliance"] or 0
                 for aid_int, group in by_alliance.items():
@@ -167,7 +186,6 @@ class KvkReport(commands.Cog):
                         conn, event_id, position_type, aid_int,
                         rank_and_assign(group, n, slot_mode, locked=locks))
         kvkdb.set_status(conn, event_id, "assigned")
-        self._skipped = skipped
         return True
 
     def _render_embeds(self, conn, event_id) -> list:
@@ -189,7 +207,7 @@ class KvkReport(commands.Cog):
         for position_type in kvkdb.get_active_types(conn, event_id):
             embeds.extend(_type_embeds(ev, position_type, by_type.get(position_type, []), minutes_map, nicknames))
 
-        skipped = sorted(set(self._skipped))
+        skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
         if skipped:
             notes_title = "Report notes"
             notes_embeds = [discord.Embed(title=notes_title, color=discord.Color.orange())]
@@ -222,6 +240,8 @@ class KvkReport(commands.Cog):
         if view.truncated:
             await interaction.followup.send(
                 f"Override select shows first {_MAX_GROUP_OPTIONS} of {len(view.groups)} groups.", ephemeral=True)
+        if not view.groups:
+            await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
 
 
 class _GroupSelect(discord.ui.Select):
@@ -292,25 +312,41 @@ class _OverrideView(discord.ui.View):
         self.scope = scope
         self.selected_type: str | None = None
         self.selected_alliance: int | None = None
-        self.groups = _distinct_groups(conn, event_id)
+        self.groups: list = []
+        self._build_items()
 
-        self.add_item(_GroupSelect(self, self.groups[:_MAX_GROUP_OPTIONS]))
+    def _build_items(self) -> None:
+        """(Re)build the view's components from the current group set.
 
-        swap_button = discord.ui.Button(label="Swap", style=discord.ButtonStyle.secondary, row=1)
-        swap_button.callback = self.swap_prompt
-        self.add_item(swap_button)
+        A Discord select must have 1-25 options, so the group select (and the buttons that
+        depend on a selected group) are only added when at least one group exists. Called from
+        __init__ and again from _refresh so the controls stay in sync after Re-run changes which
+        groups exist (e.g. the first signup for a previously-empty alliance-scope event).
+        """
+        self.clear_items()
+        self.groups = _distinct_groups(self.conn, self.event_id)
+        if (self.selected_type, self.selected_alliance) not in self.groups:
+            self.selected_type = None
+            self.selected_alliance = None
 
-        lock_button = discord.ui.Button(label="Lock", style=discord.ButtonStyle.secondary, row=1)
-        lock_button.callback = self.lock_prompt
-        self.add_item(lock_button)
+        if self.groups:
+            self.add_item(_GroupSelect(self, self.groups[:_MAX_GROUP_OPTIONS]))
 
-        unlock_button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.secondary, row=1)
-        unlock_button.callback = self.unlock_prompt
-        self.add_item(unlock_button)
+            swap_button = discord.ui.Button(label="Swap", style=discord.ButtonStyle.secondary, row=1)
+            swap_button.callback = self.swap_prompt
+            self.add_item(swap_button)
 
-        clear_button = discord.ui.Button(label="Clear", style=discord.ButtonStyle.danger, row=2)
-        clear_button.callback = self.clear_prompt
-        self.add_item(clear_button)
+            lock_button = discord.ui.Button(label="Lock", style=discord.ButtonStyle.secondary, row=1)
+            lock_button.callback = self.lock_prompt
+            self.add_item(lock_button)
+
+            unlock_button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.secondary, row=1)
+            unlock_button.callback = self.unlock_prompt
+            self.add_item(unlock_button)
+
+            clear_button = discord.ui.Button(label="Clear", style=discord.ButtonStyle.danger, row=2)
+            clear_button.callback = self.clear_prompt
+            self.add_item(clear_button)
 
         rerun_button = discord.ui.Button(label="Re-run", style=discord.ButtonStyle.primary, row=2)
         rerun_button.callback = self.rerun
@@ -339,10 +375,13 @@ class _OverrideView(discord.ui.View):
         return True
 
     async def _refresh(self, interaction: discord.Interaction):
+        self._build_items()
         embeds = self.report_cog._render_embeds(self.conn, self.event_id)
         await interaction.response.edit_message(embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], view=self)
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
+        if not self.groups:
+            await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
 
     async def swap_prompt(self, interaction: discord.Interaction):
         if await self._require_group(interaction):

@@ -1173,6 +1173,10 @@ class _KvkMenuView(discord.ui.View):
     async def back(self, interaction: discord.Interaction):
         main_menu_cog = self.cog.bot.get_cog("MainMenu")
         if main_menu_cog:
+            # This message becomes the main menu now. Forget it so a late add/remove-alliance modal's
+            # refresh_card cannot edit the main menu back into this stale KvK card.
+            self.message = None
+            self.stop()
             await main_menu_cog.show_main_menu(interaction)
         else:
             await interaction.response.send_message(

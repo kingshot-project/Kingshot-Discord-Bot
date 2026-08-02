@@ -35,3 +35,25 @@ def alliance_id_of(fid: int):
         return int(row[0])
     except (TypeError, ValueError):
         return None
+
+
+def alliance_ids_of(fids) -> dict:
+    """{fid: int alliance id or None} for many fids in ONE query (users.alliance is TEXT). Used on the
+    render hot path instead of one connection per fid."""
+    fids = list(fids)
+    if not fids:
+        return {}
+    con = sqlite3.connect(_USERS_DB)
+    try:
+        placeholders = ",".join("?" * len(fids))
+        rows = con.execute(
+            f"SELECT fid, alliance FROM users WHERE fid IN ({placeholders})", fids).fetchall()
+    finally:
+        con.close()
+    out: dict = {}
+    for fid, alliance in rows:
+        try:
+            out[fid] = int(alliance) if alliance is not None else None
+        except (TypeError, ValueError):
+            out[fid] = None
+    return out

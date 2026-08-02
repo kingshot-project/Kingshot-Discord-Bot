@@ -1,10 +1,6 @@
 """Pure sqlite data layer for db/kvk.sqlite (no discord import - unit-testable)."""
 import sqlite3
 
-_EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
-               "slot_mode", "signup_open_at", "signup_close_at", "publish_channel_id",
-               "status", "created_by", "created_at", "pro_mode", "free_mode")
-
 
 def _add_column(conn, table, name, decl) -> None:
     """Add a column if the table predates it. table/name/decl are internal literals, never user input."""
@@ -64,15 +60,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column(conn, "kvk_slots", "role", "TEXT NOT NULL DEFAULT ''")   # 'noble'/'chief' for Pro training
     _add_column(conn, "kvk_slots", "points", "INTEGER")                  # seat-specific KvK points
     # kvk_event_alliances gained chief_slots/noble_slots (the Chief/Noble seat split), replacing a
-    # single `slots` column. That old config is meaningless under the split, so rebuild the table when
-    # it predates it (it holds only per-event config and is empty in practice).
+    # single `slots` column. Migrate ADDITIVELY so existing alliance memberships survive: add the two
+    # columns and seed chief_slots from the old `slots` value (noble_slots defaults to 0).
     ea_cols = {r[1] for r in conn.execute("PRAGMA table_info(kvk_event_alliances)")}
     if "chief_slots" not in ea_cols:
-        conn.execute("DROP TABLE kvk_event_alliances")
-        conn.execute(
-            "CREATE TABLE kvk_event_alliances (event_id INTEGER NOT NULL, alliance_id INTEGER NOT NULL, "
-            "chief_slots INTEGER NOT NULL DEFAULT 0, noble_slots INTEGER NOT NULL DEFAULT 0, "
-            "PRIMARY KEY (event_id, alliance_id))")
+        _add_column(conn, "kvk_event_alliances", "chief_slots", "INTEGER NOT NULL DEFAULT 0")
+        _add_column(conn, "kvk_event_alliances", "noble_slots", "INTEGER NOT NULL DEFAULT 0")
+        if "slots" in ea_cols:
+            conn.execute("UPDATE kvk_event_alliances SET chief_slots = COALESCE(slots, 0)")
     conn.commit()
 
 
@@ -116,8 +111,11 @@ def get_event_type_dates(conn, event_id):
 
 
 def get_event(conn, event_id):
-    row = conn.execute("SELECT * FROM kvk_events WHERE id = ?", (event_id,)).fetchone()
-    return dict(zip(_EVENT_COLS, row, strict=True)) if row else None
+    # Map by the cursor's column names, not a hardcoded positional tuple: a migration that adds a
+    # column anywhere but the tail must not silently mismap every field.
+    cur = conn.execute("SELECT * FROM kvk_events WHERE id = ?", (event_id,))
+    row = cur.fetchone()
+    return {col[0]: value for col, value in zip(cur.description, row, strict=True)} if row else None
 
 
 def list_events(conn, guild_id):
@@ -179,6 +177,16 @@ def remove_event_alliance(conn, event_id, alliance_id) -> None:
     conn.execute(
         "DELETE FROM kvk_event_alliances WHERE event_id = ? AND alliance_id = ?",
         (event_id, int(alliance_id)))
+    # Drop that alliance's placed slots too, so a stale schedule does not linger before the next Re-run.
+    conn.execute(
+        "DELETE FROM kvk_slots WHERE event_id = ? AND alliance_id = ?", (event_id, int(alliance_id)))
+    conn.commit()
+
+
+def clear_event_slots(conn, event_id) -> None:
+    """Delete every placed slot for an event. Used before a full re-assign so groups that are no longer
+    active (e.g. a removed alliance) cannot leave orphaned rows."""
+    conn.execute("DELETE FROM kvk_slots WHERE event_id = ?", (event_id,))
     conn.commit()
 
 

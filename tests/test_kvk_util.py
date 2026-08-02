@@ -61,6 +61,15 @@ def test_compute_training_points_upgrade_fits():
     assert r["new_troops"] == 3 and r["kvk_points"] == 5 * 15 + 3 * 60  # 255
 
 
+def test_compute_training_points_exact_boundary_no_float_undercount():
+    # 1680 s * 2.05 == 3444 exactly, but float 1680 * (1 + 105/100) == 3443.999...; the integer-scaled
+    # math must land on 3444 so the boundary troop is not dropped.
+    assert 1680 * (1 + 105 / 100) < 3444, "guards the premise: float undershoots the exact boundary"
+    r = compute_training_points(1, 28, training_speed=105.0)
+    assert r["effective_seconds"] == 3444
+    assert r["new_troops"] == 287
+
+
 @pytest.mark.parametrize("kwargs", [
     {"base_level": 12, "hours_minutes": 60},                              # unknown base level
     {"base_level": 10, "hours_minutes": 60, "upgrade_from": 10, "upgrade_count": 5},  # from >= base

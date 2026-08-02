@@ -205,11 +205,15 @@ def _skipped_fids(conn, event_id, ev: dict) -> list:
     if ev["free_mode"]:
         return []
     added = {a["alliance_id"] for a in kvkdb.get_event_alliances(conn, event_id)}
+    per_type = {pt: [s["fid"] for s in kvkdb.get_signups(conn, event_id, pt)]
+                for pt in kvkdb.get_active_types(conn, event_id)}
+    all_fids = {fid for fids in per_type.values() for fid in fids}
+    binding = kvk_alliances.alliance_ids_of(all_fids)  # one query, not one connection per fid
     skipped = []
-    for position_type in kvkdb.get_active_types(conn, event_id):
-        for s in kvkdb.get_signups(conn, event_id, position_type):
-            if kvk_alliances.alliance_id_of(s["fid"]) not in added:
-                skipped.append(s["fid"])
+    for fids in per_type.values():
+        for fid in fids:
+            if binding.get(fid) not in added:
+                skipped.append(fid)
     return skipped
 
 
@@ -437,7 +441,12 @@ class KvkReport(commands.Cog):
         """Rank signups and auto-assign slots for every active type, honoring existing locks."""
         if kvkdb.get_event(conn, event_id) is None:
             return False
-        for (position_type, aid), rows in self._assignment_rows(conn, event_id).items():
+        # Compute first (this reads the current locks), then wipe every slot before re-saving, so a
+        # group that is no longer active - e.g. an alliance removed since the last run - cannot leave
+        # orphaned rows that would render as both scheduled and "skipped".
+        groups = self._assignment_rows(conn, event_id)
+        kvkdb.clear_event_slots(conn, event_id)
+        for (position_type, aid), rows in groups.items():
             kvkdb.save_slots(conn, event_id, position_type, aid, rows)
         kvkdb.set_status(conn, event_id, "assigned")
         return True
@@ -864,14 +873,17 @@ class _OverrideView(discord.ui.View):
 
     async def prev_page(self, interaction: discord.Interaction):
         self.player_page = max(0, self.player_page - 1)
+        self.selected_index = None  # the picked player may be off this page; do not act on them unseen
         await self._refresh(interaction)
 
     async def next_page(self, interaction: discord.Interaction):
         self.player_page += 1  # clamped in _build_items
+        self.selected_index = None  # the picked player may be off this page; do not act on them unseen
         await self._refresh(interaction)
 
     async def rerun(self, interaction: discord.Interaction):
         self.report_cog._compute(self.conn, self.event_id)
+        self.selected_index = None  # slot indices are reassigned by the re-run; drop the stale pick
         await self._refresh(interaction)
 
     async def publish(self, interaction: discord.Interaction):

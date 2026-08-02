@@ -10,6 +10,31 @@ def _conn():
     return c
 
 
+def test_alliance_migration_preserves_rows_and_seeds_chief_slots():
+    # An old DB has kvk_event_alliances with a single `slots` column and existing membership rows.
+    # init_schema must migrate additively: keep the rows and seed chief_slots from `slots`.
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE kvk_event_alliances (event_id INTEGER, alliance_id INTEGER, slots INTEGER, "
+              "PRIMARY KEY (event_id, alliance_id))")
+    c.execute("INSERT INTO kvk_event_alliances VALUES (1, 777, 9)")
+    c.commit()
+    kvk.init_schema(c)  # runs the migration
+    got = kvk.get_event_alliances(c, 1)
+    assert got == [{"alliance_id": 777, "chief_slots": 9, "noble_slots": 0}], got
+
+
+def test_get_event_maps_by_column_name_not_position():
+    # get_event must map by the cursor's column names, so it survives a non-tail column addition.
+    c = _conn()
+    eid = kvk.create_event(
+        c, guild_id=5, name="N", event_date="2026-09-01", free_mode=1, slot_mode=0,
+        signup_open_at="a", signup_close_at="b", publish_channel_id=42, created_by=7, created_at="x",
+        pro_mode=1)
+    ev = kvk.get_event(c, eid)
+    assert ev["name"] == "N" and ev["free_mode"] == 1 and ev["pro_mode"] == 1
+    assert ev["publish_channel_id"] == 42 and ev["guild_id"] == 5
+
+
 def test_free_mode_and_event_alliances():
     c = _conn()
     # A plain event created with no scope/slots defaults to alliance-based (free_mode 0).

@@ -415,21 +415,32 @@ class _KvkWizardView(discord.ui.View):
 
         posted = await _post_announcement(interaction.client, d, event_id, type_dates)
 
-        result_embed = discord.Embed(title="KvK event created", color=discord.Color.green())
-        result_embed.add_field(name="Event ID", value=str(event_id), inline=True)
-        result_embed.add_field(name="Name", value=d.name, inline=True)
+        pos_icon = {
+            "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
+        type_lines = "\n".join(f"{pos_icon.get(t, '')} {t}: {date}" for t, date in type_dates)
+        scope_text = f"alliance ({d.slots_per_alliance} slots each)" if d.scope == "alliance" else "kingdom-wide"
+
+        result_embed = discord.Embed(
+            title=f"{theme.verifiedIcon} KvK event created",
+            description=f"**{d.name}**  (id `{event_id}`)",
+            color=discord.Color.green())
+        result_embed.add_field(name=f"{theme.calendarIcon} Event date", value=d.event_date, inline=True)
+        result_embed.add_field(name=f"{theme.globeIcon} Scope", value=scope_text, inline=True)
+        result_embed.add_field(name="Mode", value="Pro" if d.pro_mode else "Standard", inline=True)
         result_embed.add_field(
-            name="Type dates",
-            value="\n".join(f"{t}: {date}" for t, date in type_dates),
-            inline=False,
-        )
+            name="Slot mode", value=f"{d.slot_mode} - {_SLOT_MODE_HINT[d.slot_mode]}", inline=True)
+        result_embed.add_field(name="Publish channel", value=f"<#{d.publish_channel_id}>", inline=True)
+        result_embed.add_field(
+            name="Signup window (UTC)", value=f"{d.signup_open_at} to {d.signup_close_at}", inline=False)
+        result_embed.add_field(name=f"{theme.membersIcon} Position dates", value=type_lines, inline=False)
+        if d.pro_mode:
+            result_embed.add_field(
+                name="Pro mode", value="Training day collects troop levels and scores KvK points.", inline=False)
         if not posted:
             result_embed.add_field(
                 name="Announcement",
-                value="The bot could not post to that channel. Check its permissions there.",
-                inline=False,
-            )
-
+                value="The bot could not post to that channel. Check its permissions there.", inline=False)
+        result_embed.set_footer(text="Players sign up with /kvk_signup.")
         await interaction.response.edit_message(embed=result_embed, view=None)
 
 

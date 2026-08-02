@@ -130,16 +130,19 @@ def compute_training_points(base_level, hours_minutes, upgrade_from=None, upgrad
 
     upgraded = 0
     upgrade_points = 0
+    upgrade_time_each = 0  # raw seconds per upgrade
+    upgrade_point_each = 0
     remaining = effective
     if upgrade_count and upgrade_count > 0 and upgrade_from is not None:
         if upgrade_from not in KVK_POINTS:
             raise ValueError(f"unknown upgrade level: {upgrade_from}")
         if upgrade_from >= base_level:
             raise ValueError("upgrade level must be below the base troop level")
-        time_each = raw_base_time - KVK_TRAIN_TIME[upgrade_from]  # raw seconds, before training speed
-        upgraded = min(upgrade_count, int(remaining // time_each))
-        remaining -= upgraded * time_each
-        upgrade_points = upgraded * (base_points - KVK_POINTS[upgrade_from])
+        upgrade_time_each = raw_base_time - KVK_TRAIN_TIME[upgrade_from]  # raw sec, before training speed
+        upgrade_point_each = base_points - KVK_POINTS[upgrade_from]
+        upgraded = min(upgrade_count, int(remaining // upgrade_time_each))
+        remaining -= upgraded * upgrade_time_each
+        upgrade_points = upgraded * upgrade_point_each
 
     new_troops = int(remaining // raw_base_time)
     new_points = new_troops * base_points
@@ -147,6 +150,11 @@ def compute_training_points(base_level, hours_minutes, upgrade_from=None, upgrad
         "kvk_points": upgrade_points + new_points,
         "new_troops": new_troops, "new_points": new_points,
         "upgraded": upgraded, "upgrade_points": upgrade_points,
+        # Intermediate values so callers can show the full derivation without recomputing it.
+        "total_seconds": total_seconds, "speed_mult": speed_mult,
+        "effective_seconds": int(effective), "remaining_seconds": int(remaining),
+        "upgrade_time_each": upgrade_time_each, "upgrade_point_each": upgrade_point_each,
+        "new_time_each": raw_base_time, "new_point_each": base_points,
     }
 
 

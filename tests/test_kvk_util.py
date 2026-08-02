@@ -75,6 +75,11 @@ def test_compute_training_points_full_stack():
     total = 202.9 + SHARED_TRAINING_BONUS
     r = compute_training_points(10, 80 * 60, upgrade_from=9, upgrade_count=900_000, training_speed=total)
     assert r["upgraded"] == 55_940 and r["kvk_points"] == 839_100
+    # Breakdown values the receipt shows; the derivation must reconcile: floor(effective/each) == count.
+    assert r["total_seconds"] == 288_000 and r["effective_seconds"] == 1_174_752
+    assert r["upgrade_time_each"] == 21 and r["upgrade_point_each"] == 15
+    assert r["new_time_each"] == 152 and r["new_point_each"] == 60
+    assert r["effective_seconds"] // r["upgrade_time_each"] == r["upgraded"]
 
 
 def test_compute_training_points_speed_zero_matches_no_speed():

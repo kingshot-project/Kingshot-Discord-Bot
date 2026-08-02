@@ -760,26 +760,36 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             result["kvk_points"], personal_speed)
 
         ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        r = result
+        steps = [
+            f"`1)` Speedups: **{format_speedups(hours_minutes)}** = {r['total_seconds']:,} s",
+            f"`2)` Training speed: {personal_speed:g}% + {SHARED_TRAINING_BONUS:g}% "
+            f"(kingdom/KvK/position) = **{total_speed:g}%**",
+            f"`3)` Effective time: {r['total_seconds']:,} x {r['speed_mult']:.3f} "
+            f"= **{r['effective_seconds']:,} s** (training speed stretches your speedups)",
+        ]
+        step = 4
+        if upgrade_from is not None and r["upgrade_time_each"]:
+            steps.append(
+                f"`{step})` Upgrade T{upgrade_from}->{base_label}: {r['effective_seconds']:,} / "
+                f"{r['upgrade_time_each']} s each = **{r['upgraded']:,}** troops x "
+                f"{r['upgrade_point_each']} pts = **{r['upgrade_points']:,}**")
+            step += 1
+        steps.append(
+            f"`{step})` New {base_label}: {r['remaining_seconds']:,} s / {r['new_time_each']} s each "
+            f"= **{r['new_troops']:,}** troops x {r['new_point_each']} pts = **{r['new_points']:,}**")
         embed = discord.Embed(
             title=f"{theme.verifiedIcon} Training signup saved",
-            description=f"KvK: **{ev['name'] if ev else self.event_id}**\nPlayer fid: `{self.fid}`",
+            description=(
+                f"{theme.crownIcon} KvK: **{ev['name'] if ev else self.event_id}**  -  fid `{self.fid}`\n"
+                f"{theme.upperDivider}\n"
+                f"{theme.targetIcon} These are **potential** points - an estimate. What you really score "
+                f"depends on holding the Training slot and the speedups you actually spend.\n"
+                f"{theme.middleDivider}\n"
+                f"{theme.chartIcon} **How it is counted**\n" + "\n".join(steps)),
             color=discord.Color.green())
-        embed.add_field(name="Base level", value=base_label, inline=True)
-        embed.add_field(name="Hours", value=format_speedups(hours_minutes), inline=True)
         embed.add_field(
-            name="Training speed",
-            value=f"{personal_speed:g}% + {SHARED_TRAINING_BONUS:g}% (kingdom/KvK/position) "
-                  f"= {total_speed:g}%",
-            inline=False)
-        if upgrade_from is not None and result["upgraded"]:
-            embed.add_field(
-                name="Upgrades",
-                value=f"{result['upgraded']:,} from T{upgrade_from} = {result['upgrade_points']:,} pts",
-                inline=False)
-        embed.add_field(
-            name="New troops",
-            value=f"{result['new_troops']:,} x {base_label} = {result['new_points']:,} pts", inline=False)
-        embed.add_field(name="KvK points", value=f"**{result['kvk_points']:,}**", inline=False)
+            name=f"{theme.medalIcon} Potential KvK points", value=f"**{r['kvk_points']:,}**", inline=False)
         view = None
         if ev and ev["scope"] == "kingdom":
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")

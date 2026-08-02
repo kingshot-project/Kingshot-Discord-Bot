@@ -903,7 +903,17 @@ class _KvkMenuView(discord.ui.View):
         self.viewer_id = viewer_id
         self.selected_event_id: int | None = None
         self.events: list = []
+        self.message: discord.Message | None = None  # set from the button interaction, for live refresh
         self._build_items()
+
+    async def refresh_card(self) -> None:
+        """Rebuild and re-edit the menu message in place. Used by the ephemeral add/remove flows, which
+        run on a separate message and so cannot edit this one through their own interaction."""
+        if self.message is None:
+            return
+        self._build_items()
+        with contextlib.suppress(discord.HTTPException):
+            await self.message.edit(embed=self.build_embed(), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Lock the menu to the admin who opened it. The /settings message is public, so without
@@ -1142,6 +1152,7 @@ class _KvkMenuView(discord.ui.View):
         if not available:
             await interaction.response.send_message("All alliances are already added.", ephemeral=True)
             return
+        self.message = interaction.message  # this menu message, so the ephemeral flow can refresh it
         await interaction.response.send_message(
             "Pick an alliance to add, then set its slot count:",
             view=_AddAllianceView(self, self.selected_event_id, available), ephemeral=True)
@@ -1153,6 +1164,7 @@ class _KvkMenuView(discord.ui.View):
         if not added:
             await interaction.response.send_message("No alliances to remove.", ephemeral=True)
             return
+        self.message = interaction.message
         names = dict(kvk_alliances.list_alliances())
         await interaction.response.send_message(
             "Pick an alliance to remove:",
@@ -1213,13 +1225,13 @@ class _AddAllianceSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         aid = int(self.values[0])
         await interaction.response.send_modal(
-            _AllianceSlotsModal(self.menu_view.cog, self.event_id, aid, self.names.get(aid, str(aid))))
+            _AllianceSlotsModal(self.menu_view, self.event_id, aid, self.names.get(aid, str(aid))))
 
 
 class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
-    def __init__(self, cog: KvkScheduling, event_id: int, alliance_id: int, alliance_name: str):
+    def __init__(self, menu_view: _KvkMenuView, event_id: int, alliance_id: int, alliance_name: str):
         super().__init__()
-        self.cog = cog
+        self.menu_view = menu_view
         self.event_id = event_id
         self.alliance_id = alliance_id
         self.alliance_name = alliance_name
@@ -1228,6 +1240,7 @@ class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
         self.add_item(self.slots_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        conn = self.menu_view.cog.conn
         try:
             slots = int(self.slots_input.value.strip())
         except ValueError:
@@ -1236,17 +1249,17 @@ class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
         if slots <= 0:
             await interaction.response.send_message("Slots must be a positive number.", ephemeral=True)
             return
-        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        ev = kvkdb.get_event(conn, self.event_id)
         max_slots = len(generate_time_slots(ev["slot_mode"])) if ev else len(generate_time_slots(0))
         if slots > max_slots:
             await interaction.response.send_message(
                 f"Slots ({slots}) is more than the {max_slots}-slot day grid. Pick {max_slots} or fewer.",
                 ephemeral=True)
             return
-        kvkdb.add_event_alliance(self.cog.conn, self.event_id, self.alliance_id, slots)
+        kvkdb.add_event_alliance(conn, self.event_id, self.alliance_id, slots)
         await interaction.response.send_message(
-            f"{theme.verifiedIcon} Added **{self.alliance_name}** with {slots} slots. "
-            f"Re-pick the event in the menu to refresh the card.", ephemeral=True)
+            f"{theme.verifiedIcon} Added **{self.alliance_name}** with {slots} slots.", ephemeral=True)
+        await self.menu_view.refresh_card()  # update the menu card in place
 
 
 class _RemoveAllianceView(discord.ui.View):
@@ -1278,8 +1291,8 @@ class _RemoveAllianceSelect(discord.ui.Select):
         aid = int(self.values[0])
         kvkdb.remove_event_alliance(self.menu_view.cog.conn, self.event_id, aid)
         await interaction.response.send_message(
-            f"{theme.verifiedIcon} Removed **{self.names.get(aid, aid)}**. "
-            f"Re-pick the event in the menu to refresh the card.", ephemeral=True)
+            f"{theme.verifiedIcon} Removed **{self.names.get(aid, aid)}**.", ephemeral=True)
+        await self.menu_view.refresh_card()  # update the menu card in place
 
 
 async def setup(bot):

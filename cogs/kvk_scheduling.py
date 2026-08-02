@@ -455,18 +455,25 @@ async def _post_announcement(
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return False
 
-    types_text = "\n".join(f"{position_type}: {type_date}" for position_type, type_date in type_dates)
+    pos_icon = {
+        "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
+    type_lines = "\n".join(f"{pos_icon.get(t, '')} {t}: {date}" for t, date in type_dates)
+    scope_text = (
+        f"alliance ({draft.slots_per_alliance} slots each)" if draft.scope == "alliance" else "kingdom-wide")
     embed = discord.Embed(
-        title=f"KvK Event: {draft.name}",
+        title=f"{theme.crossIcon} KvK: {draft.name}",
         description="Run `/kvk_signup` to sign up.",
         color=discord.Color.gold(),
     )
-    embed.add_field(name="Event ID", value=str(event_id), inline=True)
-    embed.add_field(name="Event date", value=draft.event_date, inline=True)
-    embed.add_field(name="Scope", value=draft.scope, inline=True)
+    embed.add_field(name=f"{theme.calendarIcon} Event date", value=draft.event_date, inline=True)
+    embed.add_field(name=f"{theme.globeIcon} Scope", value=scope_text, inline=True)
+    if draft.pro_mode:
+        embed.add_field(name="Mode", value="Pro (troop levels + KvK points)", inline=True)
     embed.add_field(
-        name="Signup window (UTC)", value=f"{draft.signup_open_at} to {draft.signup_close_at}", inline=False)
-    embed.add_field(name="Active types", value=types_text, inline=False)
+        name=f"{theme.alarmClockIcon} Signup window (UTC)",
+        value=f"{draft.signup_open_at} to {draft.signup_close_at}", inline=False)
+    embed.add_field(name=f"{theme.membersIcon} Position dates", value=type_lines, inline=False)
+    embed.set_footer(text=f"Event #{event_id}")
 
     try:
         await channel.send(embed=embed)

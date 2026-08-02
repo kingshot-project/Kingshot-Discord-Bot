@@ -186,6 +186,15 @@ class KvkScheduling(commands.Cog):
             await self._send_or_edit(interaction, f"Event {event_id} has no active position types.", edit=edit)
             return
 
+        if ev["pro_mode"]:
+            # Pro events: a hub with one button per position, each opening that position's own complete
+            # modal (Training's needs 5 fields on its own), so nothing is left half-filled.
+            view = _SignupHubView(self, event_id, fid, active_types)
+            await self._send_or_edit(interaction, view.content(), view=view, edit=edit)
+            with contextlib.suppress(discord.HTTPException):
+                view.message = await interaction.original_response()  # so the modals can refresh it
+            return
+
         view = _SignupTypesView(self, event_id, fid, active_types)
         await self._send_or_edit(
             interaction, "Pick position types to sign up for (up to 3), then press Enter speedups.",
@@ -551,6 +560,70 @@ class _EventSignupSelectView(discord.ui.View):
         self.add_item(_EventSignupSelect(cog, events, fids))
 
 
+class _SignupHubView(discord.ui.View):
+    """Pro-event signup hub: one button per position, each opening that position's own complete modal
+    (Training -> the 5-field Pro modal, others -> a speedup modal). Shown only for pro events; standard
+    events use the type picker. Each button flips to a checkmark once filled, so nothing is half-done."""
+
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, active_types: list[str]):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.cog = cog
+        self.event_id = event_id
+        self.fid = fid
+        self.active_types = active_types
+        self.done: set[str] = set()
+        self.message: discord.Message | None = None
+        self._build()
+
+    def content(self) -> str:
+        done = ", ".join(t for t in self.active_types if t in self.done) or "none yet"
+        left = ", ".join(t for t in self.active_types if t not in self.done) or "none"
+        return (f"{theme.crossIcon} **Pro signup** - fill each position (every button opens its own form).\n"
+                f"{theme.verifiedIcon} Done: **{done}**   |   Left: **{left}**")
+
+    def _build(self) -> None:
+        self.clear_items()
+        for position_type in self.active_types:
+            is_done = position_type in self.done
+            button = discord.ui.Button(
+                label=f"{position_type} {theme.verifiedIcon}" if is_done else position_type,
+                emoji=_POSITION_ICON.get(position_type),
+                style=discord.ButtonStyle.success if is_done else discord.ButtonStyle.primary)
+            button.callback = self._position_cb(position_type)
+            self.add_item(button)
+        pref = discord.ui.Button(
+            label="Preferred times", emoji=theme.timeIcon, style=discord.ButtonStyle.secondary)
+        pref.callback = self._preferred
+        self.add_item(pref)
+
+    def _position_cb(self, position_type: str):
+        async def callback(interaction: discord.Interaction):
+            if position_type == "Training":
+                modal = _ProTrainingModal(self.cog, self.event_id, self.fid, hub=self)
+            else:
+                modal = _SignupSpeedupModal(self.cog, self.event_id, self.fid, [position_type], hub=self)
+            await interaction.response.send_modal(modal)
+        return callback
+
+    async def mark_done(self, position_type: str) -> None:
+        """Flip a position to done and refresh the hub message in place."""
+        self.done.add(position_type)
+        self._build()
+        if self.message is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await self.message.edit(content=self.content(), view=self)
+
+    async def _preferred(self, interaction: discord.Interaction):
+        done = [t for t in self.active_types if t in self.done]
+        if not done:
+            await interaction.response.send_message(
+                "Fill at least one position first, then add preferred times.", ephemeral=True)
+            return
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        await interaction.response.send_modal(
+            _PreferredTimesModal(self.cog, self.event_id, self.fid, done, ev["slot_mode"] if ev else 0))
+
+
 class _SignupTypeSelect(discord.ui.Select):
     def __init__(self, types_view: "_SignupTypesView", active_types: list[str]):
         options = [discord.SelectOption(label=t, value=t) for t in active_types]
@@ -587,29 +660,21 @@ class _SignupTypesView(discord.ui.View):
         if not self.selected_types:
             await interaction.response.send_message("Pick at least one position type first.", ephemeral=True)
             return
-        ev = kvkdb.get_event(self.cog.conn, self.event_id)
-        pro_training = bool(ev and ev["pro_mode"]) and "Training" in self.selected_types
-        non_training = [t for t in self.selected_types if t != "Training"]
-        if pro_training and not non_training:
-            await interaction.response.send_modal(_ProTrainingModal(self.cog, self.event_id, self.fid))
-        elif pro_training:
-            await interaction.response.send_modal(
-                _SignupSpeedupModal(self.cog, self.event_id, self.fid, non_training, then_pro_training=True))
-        else:
-            await interaction.response.send_modal(
-                _SignupSpeedupModal(self.cog, self.event_id, self.fid, self.selected_types))
+        # Standard events only reach this view; pro events use _SignupHubView instead.
+        await interaction.response.send_modal(
+            _SignupSpeedupModal(self.cog, self.event_id, self.fid, self.selected_types))
 
 
 class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
-    """Step 2 of signup: one speedup input per chosen position type."""
+    """One speedup input per position type. In a pro event it is opened from the hub for a single
+    position (hub set); in a standard event from the type picker for the chosen types (hub None)."""
 
-    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str],
-                 then_pro_training: bool = False):
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str], hub=None):
         super().__init__()
         self.cog = cog
         self.event_id = event_id
         self.fid = fid
-        self.then_pro_training = then_pro_training
+        self.hub = hub
         self.speedup_inputs: dict[str, discord.ui.TextInput] = {}
         for position_type in position_types:
             text_input = discord.ui.TextInput(label=f"{position_type} speedup (e.g. 7d 12h)", max_length=50)
@@ -633,6 +698,13 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
                 self.cog.conn, self.event_id, self.fid, position_type, minutes,
                 interaction.user.id, submitted_at)
 
+        if self.hub is not None:  # pro-event hub: brief confirm, then flip the position's button to done
+            saved = ", ".join(f"{p} {format_speedups(m)}" for p, m in parsed.items())
+            await interaction.response.send_message(f"{theme.verifiedIcon} Saved: {saved}", ephemeral=True)
+            for position_type in parsed:
+                await self.hub.mark_done(position_type)
+            return
+
         ev = kvkdb.get_event(self.cog.conn, self.event_id)
         event_name = ev["name"] if ev else str(self.event_id)
         embed = discord.Embed(
@@ -641,42 +713,22 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             color=discord.Color.green())
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
-        # The pick is just recorded for the report; leaders place players (alliance events are merged
-        # with the other alliances outside the bot), so it is offered for every event.
         view = None
-        if self.then_pro_training:
-            embed.set_footer(text="Now enter your Training details for Pro scoring.")
-            view = _ProTrainingEntryView(self.cog, self.event_id, self.fid)
-        elif ev:
+        if ev:
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")
             view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys()))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-class _ProTrainingEntryView(discord.ui.View):
-    """After non-training speedups are saved in a Pro event, opens the Pro training-day modal."""
-
-    def __init__(self, cog: KvkScheduling, event_id: int, fid: int):
-        super().__init__(timeout=VIEW_TIMEOUT)
-        self.cog = cog
-        self.event_id = event_id
-        self.fid = fid
-        button = discord.ui.Button(label="Enter Training details", style=discord.ButtonStyle.primary)
-        button.callback = self.enter
-        self.add_item(button)
-
-    async def enter(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(_ProTrainingModal(self.cog, self.event_id, self.fid))
-
-
 class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
     """Pro-mode Training day: base level + hours (+ optional troop upgrade) -> computed KvK points."""
 
-    def __init__(self, cog: KvkScheduling, event_id: int, fid: int):
+    def __init__(self, cog: KvkScheduling, event_id: int, fid: int, hub=None):
         super().__init__()
         self.cog = cog
         self.event_id = event_id
         self.fid = fid
+        self.hub = hub
         self.base = discord.ui.Label(
             text="Base troop level",
             component=discord.ui.Select(
@@ -782,6 +834,10 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             color=discord.Color.green())
         embed.add_field(
             name=f"{theme.medalIcon} Potential KvK points", value=f"**{r['kvk_points']:,}**", inline=False)
+        if self.hub is not None:  # pro hub: show the receipt, then flip the Training button to done
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await self.hub.mark_done("Training")
+            return
         view = None
         if ev:
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")

@@ -649,13 +649,13 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             color=discord.Color.green())
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
-        # Preferred times only make sense for kingdom scope (full-day grid); alliance slots are
-        # the first N times of the grid, so a preference there could not be honored.
+        # The pick is just recorded for the report; leaders place players (alliance events are merged
+        # with the other alliances outside the bot), so it is offered for every scope.
         view = None
         if self.then_pro_training:
             embed.set_footer(text="Now enter your Training details for Pro scoring.")
             view = _ProTrainingEntryView(self.cog, self.event_id, self.fid)
-        elif ev and ev["scope"] == "kingdom":
+        elif ev:
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")
             view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys()))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -791,7 +791,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         embed.add_field(
             name=f"{theme.medalIcon} Potential KvK points", value=f"**{r['kvk_points']:,}**", inline=False)
         view = None
-        if ev and ev["scope"] == "kingdom":
+        if ev:
             embed.set_footer(text="Optional: add preferred times to say which slots you want.")
             view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, ["Training"])
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -821,8 +821,9 @@ class _PreferredTimesEntryView(discord.ui.View):
 
 
 class _PreferredTimesModal(discord.ui.Modal, title="KvK Preferred Times"):
-    """Optional: one preferred-times field per type (free text, e.g. '20:00-22:00, 23:30'). Auto-assign
-    tries to give higher-speedup players their preferred slots first."""
+    """Optional: one preferred-times field per type (free text, e.g. '20:00-22:00, 23:30'). The pick is
+    saved and shown in View signups / the report so leaders can place players; for alliance events they
+    merge with the other alliances outside the bot."""
 
     def __init__(self, cog: KvkScheduling, event_id: int, fid: int, position_types: list[str], slot_mode: int):
         super().__init__()

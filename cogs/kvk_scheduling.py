@@ -288,6 +288,22 @@ class _SlotModeSelect(discord.ui.Select):
         await self.wizard_view.refresh(interaction)
 
 
+class _ProModeSelect(discord.ui.Select):
+    def __init__(self, wizard_view: "_KvkWizardView"):
+        options = [
+            discord.SelectOption(label="Standard mode", value="0", default=True),
+            discord.SelectOption(
+                label="Pro mode", value="1",
+                description="Training day collects troop levels and scores KvK points"),
+        ]
+        super().__init__(placeholder="Pick the event mode", options=options, min_values=1, max_values=1)
+        self.wizard_view = wizard_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.wizard_view.draft.pro_mode = int(self.values[0])
+        await self.wizard_view.refresh(interaction)
+
+
 class _TypesSelect(discord.ui.Select):
     def __init__(self, wizard_view: "_KvkWizardView"):
         options = [discord.SelectOption(label=t, value=t) for t in POSITION_TYPES]
@@ -322,24 +338,13 @@ class _KvkWizardView(discord.ui.View):
         self.cog = cog
         self.draft = draft
         self.add_item(_SlotModeSelect(self))
+        self.add_item(_ProModeSelect(self))
         self.add_item(_TypesSelect(self))
         self.add_item(_PublishChannelSelect(self))
-        self.mode_button = discord.ui.Button(
-            label=self._mode_label(), style=discord.ButtonStyle.secondary, row=3)
-        self.mode_button.callback = self.toggle_mode
-        self.add_item(self.mode_button)
         confirm_button = discord.ui.Button(
-            label="Confirm and create", style=discord.ButtonStyle.primary, row=3)
+            label="Confirm and create", style=discord.ButtonStyle.primary, row=4)
         confirm_button.callback = self.confirm
         self.add_item(confirm_button)
-
-    def _mode_label(self) -> str:
-        return f"Mode: {'Pro' if self.draft.pro_mode else 'Standard'} (tap to switch)"
-
-    async def toggle_mode(self, interaction: discord.Interaction):
-        self.draft.pro_mode = 0 if self.draft.pro_mode else 1
-        self.mode_button.label = self._mode_label()
-        await self.refresh(interaction)
 
     def build_embed(self) -> discord.Embed:
         d = self.draft

@@ -3,7 +3,7 @@ import sqlite3
 
 _EVENT_COLS = ("id", "guild_id", "name", "event_date", "scope", "slots_per_alliance",
                "slot_mode", "signup_open_at", "signup_close_at", "publish_channel_id",
-               "status", "created_by", "created_at", "pro_mode")
+               "status", "created_by", "created_at", "pro_mode", "free_mode")
 
 
 def _add_column(conn, table, name, decl) -> None:
@@ -24,7 +24,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
             slot_mode INTEGER NOT NULL DEFAULT 0, signup_open_at TEXT NOT NULL,
             signup_close_at TEXT NOT NULL, publish_channel_id INTEGER,
             status TEXT NOT NULL DEFAULT 'collecting', created_by INTEGER NOT NULL, created_at TEXT NOT NULL,
-            pro_mode INTEGER NOT NULL DEFAULT 0
+            pro_mode INTEGER NOT NULL DEFAULT 0, free_mode INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS kvk_event_alliances (
+            event_id INTEGER NOT NULL, alliance_id INTEGER NOT NULL, slots INTEGER NOT NULL,
+            PRIMARY KEY (event_id, alliance_id)
         );
         CREATE TABLE IF NOT EXISTS kvk_event_types (
             event_id INTEGER NOT NULL, position_type TEXT NOT NULL, type_date TEXT NOT NULL,
@@ -54,17 +58,22 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column(conn, "kvk_signups", "kvk_points", "INTEGER")
     _add_column(conn, "kvk_signups", "training_speed", "REAL")
     _add_column(conn, "kvk_events", "pro_mode", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "kvk_events", "free_mode", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
 def create_event(conn, **f) -> int:
+    # scope/slots_per_alliance are vestigial (replaced by free_mode + kvk_event_alliances); kept only so
+    # the NOT NULL scope column has a value. Registration is driven by free_mode and the alliance table.
     cur = conn.execute(
         """INSERT INTO kvk_events (guild_id, name, event_date, scope, slots_per_alliance, slot_mode,
-           signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at, pro_mode)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?)""",
-        (f["guild_id"], f["name"], f["event_date"], f["scope"], f["slots_per_alliance"], f["slot_mode"],
-         f["signup_open_at"], f["signup_close_at"], f["publish_channel_id"], f["created_by"], f["created_at"],
-         int(f.get("pro_mode", 0))),
+           signup_open_at, signup_close_at, publish_channel_id, status, created_by, created_at, pro_mode,
+           free_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?, ?)""",
+        (f["guild_id"], f["name"], f["event_date"], f.get("scope", "alliance"),
+         f.get("slots_per_alliance"), f["slot_mode"], f["signup_open_at"], f["signup_close_at"],
+         f["publish_channel_id"], f["created_by"], f["created_at"], int(f.get("pro_mode", 0)),
+         int(f.get("free_mode", 0))),
     )
     conn.commit()
     return cur.lastrowid
@@ -127,12 +136,43 @@ def set_status(conn, event_id, status) -> None:
 
 
 def delete_event(conn, event_id) -> None:
-    """Remove an event and everything tied to it: its types, signups, and slots."""
+    """Remove an event and everything tied to it: its types, signups, slots, and alliances."""
     conn.execute("DELETE FROM kvk_slots WHERE event_id = ?", (event_id,))
     conn.execute("DELETE FROM kvk_signups WHERE event_id = ?", (event_id,))
     conn.execute("DELETE FROM kvk_event_types WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM kvk_event_alliances WHERE event_id = ?", (event_id,))
     conn.execute("DELETE FROM kvk_events WHERE id = ?", (event_id,))
     conn.commit()
+
+
+def set_free_mode(conn, event_id, free_mode) -> None:
+    """Switch an event between free registration (1) and alliance-based (0)."""
+    conn.execute("UPDATE kvk_events SET free_mode = ? WHERE id = ?", (int(bool(free_mode)), event_id))
+    conn.commit()
+
+
+def add_event_alliance(conn, event_id, alliance_id, slots) -> None:
+    """Add (or update the slot count of) an alliance taking part in an event."""
+    conn.execute(
+        "INSERT INTO kvk_event_alliances (event_id, alliance_id, slots) VALUES (?, ?, ?) "
+        "ON CONFLICT (event_id, alliance_id) DO UPDATE SET slots = excluded.slots",
+        (event_id, int(alliance_id), int(slots)))
+    conn.commit()
+
+
+def remove_event_alliance(conn, event_id, alliance_id) -> None:
+    conn.execute(
+        "DELETE FROM kvk_event_alliances WHERE event_id = ? AND alliance_id = ?",
+        (event_id, int(alliance_id)))
+    conn.commit()
+
+
+def get_event_alliances(conn, event_id) -> list:
+    """The alliances taking part in an event, as [{'alliance_id', 'slots'}], ordered by alliance id."""
+    rows = conn.execute(
+        "SELECT alliance_id, slots FROM kvk_event_alliances WHERE event_id = ? ORDER BY alliance_id",
+        (event_id,)).fetchall()
+    return [{"alliance_id": r[0], "slots": r[1]} for r in rows]
 
 
 def upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at) -> None:

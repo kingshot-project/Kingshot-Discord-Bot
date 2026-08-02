@@ -10,6 +10,33 @@ def _conn():
     return c
 
 
+def test_free_mode_and_event_alliances():
+    c = _conn()
+    # A plain event created with no scope/slots defaults to alliance-based (free_mode 0).
+    eid = kvk.create_event(
+        c, guild_id=1, name="Plain", event_date="2026-09-01", slot_mode=0,
+        signup_open_at="a", signup_close_at="b", publish_channel_id=None, created_by=1, created_at="c")
+    assert kvk.get_event(c, eid)["free_mode"] == 0
+
+    kvk.set_free_mode(c, eid, True)
+    assert kvk.get_event(c, eid)["free_mode"] == 1
+    kvk.set_free_mode(c, eid, False)
+    assert kvk.get_event(c, eid)["free_mode"] == 0
+
+    kvk.add_event_alliance(c, eid, 1, 10)
+    kvk.add_event_alliance(c, eid, 2, 5)
+    assert kvk.get_event_alliances(c, eid) == [
+        {"alliance_id": 1, "slots": 10}, {"alliance_id": 2, "slots": 5}]
+    kvk.add_event_alliance(c, eid, 1, 8)  # same alliance -> updates its slot count, no duplicate
+    assert kvk.get_event_alliances(c, eid) == [
+        {"alliance_id": 1, "slots": 8}, {"alliance_id": 2, "slots": 5}]
+    kvk.remove_event_alliance(c, eid, 2)
+    assert kvk.get_event_alliances(c, eid) == [{"alliance_id": 1, "slots": 8}]
+
+    kvk.delete_event(c, eid)  # cascade removes the alliance rows
+    assert kvk.get_event_alliances(c, eid) == []
+
+
 def test_create_event_and_active_types():
     c = _conn()
     eid = kvk.create_event(

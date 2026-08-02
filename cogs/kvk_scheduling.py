@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from . import kvk_alliances
 from . import kvk_data as kvkdb
 from .kvk_util import (
     POSITION_TYPES,
@@ -84,7 +85,7 @@ class KvkScheduling(commands.Cog):
         if interaction.guild_id is None:
             await interaction.response.send_message("Use this command in a server, not a DM.", ephemeral=True)
             return
-        await interaction.response.send_modal(_KvkCreateModal(self, interaction.guild_id))
+        await interaction.response.send_modal(_KvkCreateModal(self))
 
     @app_commands.command(name="kvk_create", description="Start the KvK event setup wizard (Global Admin only).")
     async def kvk_create(self, interaction: discord.Interaction):
@@ -164,6 +165,22 @@ class KvkScheduling(commands.Cog):
                 await self._send_or_edit(interaction, "The signup window for this event is closed.", edit=edit)
                 return
 
+            aid = kvk_alliances.alliance_id_of(fid)
+            if aid is None:
+                await self._send_or_edit(
+                    interaction,
+                    f"{theme.deniedIcon} You must be bound to an alliance to sign up. "
+                    f"Set your alliance first, then try again.", edit=edit)
+                return
+            if not ev["free_mode"]:
+                added = {a["alliance_id"] for a in kvkdb.get_event_alliances(self.conn, event_id)}
+                if aid not in added:
+                    await self._send_or_edit(
+                        interaction,
+                        f"{theme.deniedIcon} Your alliance is not part of this KvK event. "
+                        f"Ask an admin to add it, or use a different event.", edit=edit)
+                    return
+
         active_types = kvkdb.get_active_types(self.conn, event_id)
         if not active_types:
             await self._send_or_edit(interaction, f"Event {event_id} has no active position types.", edit=edit)
@@ -187,14 +204,12 @@ class KvkScheduling(commands.Cog):
 class _KvkDraft:
     """Holds wizard state between the create modal and the final confirm."""
 
-    def __init__(self, guild_id: int, created_by: int, name: str, event_date: str, scope: str,
-                 slots_per_alliance: int | None, signup_open_at: str, signup_close_at: str):
+    def __init__(self, guild_id: int, created_by: int, name: str, event_date: str,
+                 signup_open_at: str, signup_close_at: str):
         self.guild_id = guild_id
         self.created_by = created_by
         self.name = name
         self.event_date = event_date
-        self.scope = scope
-        self.slots_per_alliance = slots_per_alliance
         self.signup_open_at = signup_open_at
         self.signup_close_at = signup_close_at
         self.slot_mode = 0
@@ -204,20 +219,17 @@ class _KvkDraft:
 
 
 class _KvkCreateModal(discord.ui.Modal, title="Create KvK Event"):
-    """First step: name, dates, and the alliance-vs-kingdom scope switch."""
+    """First step: name, event date, and the signup window. Alliances and free mode are set after."""
 
-    def __init__(self, cog: KvkScheduling, guild_id: int):
+    def __init__(self, cog: KvkScheduling):
         super().__init__()
         self.cog = cog
         # Pre-fill the next KvK: start = next KvK Monday, signups run the weekend before (Fri 00:00 to
-        # the Monday 00:00, i.e. through Sunday). Slots/scope carry from the guild's last event. All editable.
+        # the Monday 00:00, i.e. through Sunday). All editable.
         start = next_kvk_date(datetime.now(UTC).date())
         start_str = start.strftime(DATE_FMT)
         open_str = (start - timedelta(days=3)).strftime(DATE_FMT) + " 00:00"
         close_str = start_str + " 00:00"
-        events = kvkdb.list_events(cog.conn, guild_id)
-        last = kvkdb.get_event(cog.conn, events[0]["id"]) if events else None
-        slots_default = str(last["slots_per_alliance"]) if last and last["slots_per_alliance"] else None
 
         self.name_input = discord.ui.TextInput(
             label="Event name", max_length=100, default=f"KvK {start_str}")
@@ -233,10 +245,6 @@ class _KvkCreateModal(discord.ui.Modal, title="Create KvK Event"):
             label="Signup closes (YYYY-MM-DD HH:MM UTC)", placeholder="2026-08-31 00:00", max_length=16,
             default=close_str)
         self.add_item(self.signup_close_input)
-        self.slots_per_alliance_input = discord.ui.TextInput(
-            label="Slots per alliance (blank = kingdom scope)", required=False, max_length=5,
-            default=slots_default)
-        self.add_item(self.slots_per_alliance_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         name = self.name_input.value.strip()
@@ -264,30 +272,11 @@ class _KvkCreateModal(discord.ui.Modal, title="Create KvK Event"):
                 "Signup close time must use format YYYY-MM-DD HH:MM.", ephemeral=True)
             return
 
-        raw_n = self.slots_per_alliance_input.value.strip()
-        if raw_n:
-            try:
-                slots_per_alliance = int(raw_n)
-            except ValueError:
-                await interaction.response.send_message(
-                    "Slots per alliance must be a whole number.", ephemeral=True)
-                return
-            if slots_per_alliance <= 0:
-                await interaction.response.send_message(
-                    "Slots per alliance must be a positive number.", ephemeral=True)
-                return
-            scope = "alliance"
-        else:
-            slots_per_alliance = None
-            scope = "kingdom"
-
         draft = _KvkDraft(
             guild_id=interaction.guild_id,
             created_by=interaction.user.id,
             name=name,
             event_date=event_date,
-            scope=scope,
-            slots_per_alliance=slots_per_alliance,
             signup_open_at=signup_open_at,
             signup_close_at=signup_close_at,
         )
@@ -388,12 +377,9 @@ class _KvkWizardView(discord.ui.View):
         else:
             types_text = "(pick at least one)"
         channel_text = f"<#{d.publish_channel_id}>" if d.publish_channel_id else "(pick a channel)"
-        n_text = str(d.slots_per_alliance) if d.scope == "alliance" else "n/a (kingdom scope)"
         embed = discord.Embed(title="Create KvK Event", color=discord.Color.blue())
         embed.add_field(name="Name", value=d.name, inline=False)
         embed.add_field(name="Event date", value=d.event_date, inline=True)
-        embed.add_field(name="Scope", value=d.scope, inline=True)
-        embed.add_field(name="Slots per alliance", value=n_text, inline=True)
         embed.add_field(
             name="Slot mode", value=f"{d.slot_mode} ({_SLOT_MODE_HINT[d.slot_mode]})", inline=True)
         embed.add_field(name="Mode", value="Pro" if d.pro_mode else "Standard", inline=True)
@@ -413,13 +399,6 @@ class _KvkWizardView(discord.ui.View):
         if d.publish_channel_id is None:
             await interaction.response.send_message("Pick a publish channel.", ephemeral=True)
             return
-        if d.scope == "alliance":
-            max_slots = len(generate_time_slots(d.slot_mode))
-            if d.slots_per_alliance > max_slots:
-                await interaction.response.send_message(
-                    f"Slots per alliance ({d.slots_per_alliance}) is more than "
-                    f"the grid size ({max_slots}).", ephemeral=True)
-                return
 
         type_dates = type_dates_for(d.event_date, d.active_types)
         event_id = kvkdb.create_event(
@@ -427,8 +406,6 @@ class _KvkWizardView(discord.ui.View):
             guild_id=d.guild_id,
             name=d.name,
             event_date=d.event_date,
-            scope=d.scope,
-            slots_per_alliance=d.slots_per_alliance,
             slot_mode=d.slot_mode,
             signup_open_at=d.signup_open_at,
             signup_close_at=d.signup_close_at,
@@ -441,13 +418,11 @@ class _KvkWizardView(discord.ui.View):
 
         posted = await _post_announcement(interaction.client, d, event_id, type_dates)
 
-        scope_text = f"alliance ({d.slots_per_alliance} slots each)" if d.scope == "alliance" else "kingdom-wide"
         mode_text = "Pro (troop levels + KvK points)" if d.pro_mode else "Standard"
         description = (
             f"**{d.name}**  (id `{event_id}`)\n"
             f"{theme.upperDivider}\n"
             f"{theme.calendarIcon} **Event date** - {d.event_date}\n"
-            f"{theme.globeIcon} **Scope** - {scope_text}\n"
             f"{theme.timeIcon} **Slot mode** - {d.slot_mode} ({_SLOT_MODE_HINT[d.slot_mode]})\n"
             f"{theme.boltIcon} **Mode** - {mode_text}\n"
             f"{theme.alarmClockIcon} **Signup (UTC)** - {d.signup_open_at} to {d.signup_close_at}\n"
@@ -462,7 +437,8 @@ class _KvkWizardView(discord.ui.View):
             result_embed.add_field(
                 name="Announcement",
                 value="The bot could not post to that channel. Check its permissions there.", inline=False)
-        result_embed.set_footer(text="Players sign up with /kvk_signup.")
+        result_embed.set_footer(
+            text="Next: pick this event in the KvK menu, then Add alliance or Toggle free registration.")
         await interaction.response.edit_message(embed=result_embed, view=None)
 
 
@@ -502,14 +478,11 @@ async def _post_announcement(
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return False
 
-    scope_text = (
-        f"alliance ({draft.slots_per_alliance} slots each)" if draft.scope == "alliance" else "kingdom-wide")
     mode_line = f"{theme.boltIcon} **Mode** - Pro (troop levels + KvK points)\n" if draft.pro_mode else ""
     description = (
         f"{theme.crownIcon} A new Kingdom-vs-Kingdom event has opened.\n"
         f"{theme.upperDivider}\n"
         f"{theme.calendarIcon} **Event date** - {draft.event_date}\n"
-        f"{theme.globeIcon} **Scope** - {scope_text}\n"
         f"{theme.alarmClockIcon} **Signup (UTC)** - {draft.signup_open_at} to {draft.signup_close_at}\n"
         f"{mode_line}"
         f"{theme.middleDivider}\n"
@@ -665,7 +638,7 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
         # The pick is just recorded for the report; leaders place players (alliance events are merged
-        # with the other alliances outside the bot), so it is offered for every scope.
+        # with the other alliances outside the bot), so it is offered for every event.
         view = None
         if self.then_pro_training:
             embed.set_footer(text="Now enter your Training details for Pro scoring.")
@@ -882,7 +855,7 @@ class _KvkEventSelect(discord.ui.Select):
             discord.SelectOption(
                 label=e["name"][:100],
                 value=str(e["id"]),
-                description=f"{e['event_date']} - {e['scope']} - {e['status']}"[:100],
+                description=f"{e['event_date']} - {e['status']}"[:100],
                 emoji=_status_icon(e["status"]),
                 default=(e["id"] == menu_view.selected_event_id),
             )
@@ -979,8 +952,25 @@ class _KvkMenuView(discord.ui.View):
             view_button.callback = self.view
             self.add_item(view_button)
 
+        selected = kvkdb.get_event(self.cog.conn, self.selected_event_id) if self.selected_event_id else None
+        if selected is not None:
+            toggle = discord.ui.Button(
+                label="Switch to alliances" if selected["free_mode"] else "Switch to free reg",
+                emoji=theme.globeIcon, style=discord.ButtonStyle.secondary, row=2)
+            toggle.callback = self.toggle_free
+            self.add_item(toggle)
+            if not selected["free_mode"]:
+                add_alliance_button = discord.ui.Button(
+                    label="Add alliance", emoji=theme.addIcon, style=discord.ButtonStyle.success, row=2)
+                add_alliance_button.callback = self.add_alliance
+                self.add_item(add_alliance_button)
+                remove_alliance_button = discord.ui.Button(
+                    label="Remove alliance", style=discord.ButtonStyle.secondary, row=2)
+                remove_alliance_button.callback = self.remove_alliance
+                self.add_item(remove_alliance_button)
+
         back_button = discord.ui.Button(
-            label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=2)
+            label="Back", emoji=theme.backIcon, style=discord.ButtonStyle.secondary, row=3)
         back_button.callback = self.back
         self.add_item(back_button)
 
@@ -1022,6 +1012,18 @@ class _KvkMenuView(discord.ui.View):
             return f"{theme.deniedIcon} closed (ended {ev['signup_close_at']} UTC)"
         return f"{theme.verifiedIcon} OPEN now (until {ev['signup_close_at']} UTC)"
 
+    def _registration_mode(self, ev: dict) -> str:
+        """A readable summary of the event's registration mode for the detail card."""
+        if ev["free_mode"]:
+            return "Free registration - open to any bound player, kingdom-wide grid"
+        added = kvkdb.get_event_alliances(self.cog.conn, ev["id"])
+        if not added:
+            return "Alliance-based - no alliances added yet (use Add alliance)"
+        names = dict(kvk_alliances.list_alliances())
+        lines = "\n".join(
+            f"- {names.get(a['alliance_id'], a['alliance_id'])}: {a['slots']} slots" for a in added)
+        return f"Alliance-based\n{lines}"
+
     def _add_event_fields(self, embed: discord.Embed) -> None:
         """Structured details of the selected event, as embed fields for readability."""
         ev = kvkdb.get_event(self.cog.conn, self.selected_event_id)
@@ -1036,13 +1038,12 @@ class _KvkMenuView(discord.ui.View):
         type_dates = kvkdb.get_event_type_dates(self.cog.conn, self.selected_event_id)
         type_lines = "\n".join(
             f"- {t}: {d} ({counts.get(t, 0)} signups)" for t, d in type_dates) or "(none)"
-        n_text = f"{ev['slots_per_alliance']} slots per alliance" if ev["scope"] == "alliance" else "kingdom-wide"
         channel = f"<#{ev['publish_channel_id']}>" if ev["publish_channel_id"] else "(none)"
         icon = _status_icon(ev["status"]) or ""
 
         embed.add_field(name=f"{icon} {ev['name']}", value=f"id {ev['id']} - status **{ev['status']}**", inline=False)
         embed.add_field(name=f"{theme.calendarIcon} Event date", value=ev["event_date"], inline=True)
-        embed.add_field(name=f"{theme.globeIcon} Scope", value=f"{ev['scope']} ({n_text})", inline=True)
+        embed.add_field(name=f"{theme.globeIcon} Registration", value=self._registration_mode(ev), inline=False)
         embed.add_field(
             name="Slot mode", value=f"{ev['slot_mode']} - {_SLOT_MODE_HINT.get(ev['slot_mode'], '')}", inline=True)
         embed.add_field(
@@ -1117,6 +1118,41 @@ class _KvkMenuView(discord.ui.View):
                     f"and cannot be undone.",
             embed=None, view=_ConfirmDeleteView(self, self.selected_event_id))
 
+    async def toggle_free(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        ev = kvkdb.get_event(self.cog.conn, self.selected_event_id)
+        if ev is None:
+            await interaction.response.send_message("This event no longer exists.", ephemeral=True)
+            return
+        kvkdb.set_free_mode(self.cog.conn, self.selected_event_id, not ev["free_mode"])
+        self._build_items()  # the alliance buttons appear/disappear with the mode
+        await safe_edit_message(interaction, embed=self.build_embed(), view=self)
+
+    async def add_alliance(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        added = {a["alliance_id"] for a in kvkdb.get_event_alliances(self.cog.conn, self.selected_event_id)}
+        available = [(aid, name) for aid, name in kvk_alliances.list_alliances() if aid not in added]
+        if not available:
+            await interaction.response.send_message("All alliances are already added.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Pick an alliance to add, then set its slot count:",
+            view=_AddAllianceView(self, self.selected_event_id, available), ephemeral=True)
+
+    async def remove_alliance(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        added = kvkdb.get_event_alliances(self.cog.conn, self.selected_event_id)
+        if not added:
+            await interaction.response.send_message("No alliances to remove.", ephemeral=True)
+            return
+        names = dict(kvk_alliances.list_alliances())
+        await interaction.response.send_message(
+            "Pick an alliance to remove:",
+            view=_RemoveAllianceView(self, self.selected_event_id, added, names), ephemeral=True)
+
 
 class _ConfirmDeleteView(discord.ui.View):
     """Yes/Cancel gate before deleting an event; both paths return to the refreshed KvK menu."""
@@ -1147,6 +1183,91 @@ class _ConfirmDeleteView(discord.ui.View):
         self.menu_view._build_items()
         await interaction.response.edit_message(
             content=None, embed=self.menu_view.build_embed(), view=self.menu_view)
+
+
+class _AddAllianceView(discord.ui.View):
+    """Ephemeral: pick one of the not-yet-added alliances, then set its slot count."""
+
+    def __init__(self, menu_view: _KvkMenuView, event_id: int, available: list):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.menu_view = menu_view
+        self.add_item(_AddAllianceSelect(menu_view, event_id, available))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.menu_view.interaction_check(interaction)
+
+
+class _AddAllianceSelect(discord.ui.Select):
+    def __init__(self, menu_view: _KvkMenuView, event_id: int, available: list):
+        options = [discord.SelectOption(label=name[:100], value=str(aid)) for aid, name in available[:25]]
+        super().__init__(placeholder="Pick an alliance", options=options, min_values=1, max_values=1)
+        self.menu_view = menu_view
+        self.event_id = event_id
+        self.names = dict(available)
+
+    async def callback(self, interaction: discord.Interaction):
+        aid = int(self.values[0])
+        await interaction.response.send_modal(
+            _AllianceSlotsModal(self.menu_view.cog, self.event_id, aid, self.names.get(aid, str(aid))))
+
+
+class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
+    def __init__(self, cog: KvkScheduling, event_id: int, alliance_id: int, alliance_name: str):
+        super().__init__()
+        self.cog = cog
+        self.event_id = event_id
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.slots_input = discord.ui.TextInput(
+            label=f"Slots for {alliance_name}"[:45], placeholder="10", max_length=4)
+        self.add_item(self.slots_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            slots = int(self.slots_input.value.strip())
+        except ValueError:
+            await interaction.response.send_message("Slots must be a whole number.", ephemeral=True)
+            return
+        if slots <= 0:
+            await interaction.response.send_message("Slots must be a positive number.", ephemeral=True)
+            return
+        kvkdb.add_event_alliance(self.cog.conn, self.event_id, self.alliance_id, slots)
+        await interaction.response.send_message(
+            f"{theme.verifiedIcon} Added **{self.alliance_name}** with {slots} slots. "
+            f"Re-pick the event in the menu to refresh the card.", ephemeral=True)
+
+
+class _RemoveAllianceView(discord.ui.View):
+    """Ephemeral: pick one of the event's alliances to remove."""
+
+    def __init__(self, menu_view: _KvkMenuView, event_id: int, added: list, names: dict):
+        super().__init__(timeout=VIEW_TIMEOUT)
+        self.menu_view = menu_view
+        self.add_item(_RemoveAllianceSelect(menu_view, event_id, added, names))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.menu_view.interaction_check(interaction)
+
+
+class _RemoveAllianceSelect(discord.ui.Select):
+    def __init__(self, menu_view: _KvkMenuView, event_id: int, added: list, names: dict):
+        options = [
+            discord.SelectOption(
+                label=f"{names.get(a['alliance_id'], a['alliance_id'])} ({a['slots']} slots)"[:100],
+                value=str(a["alliance_id"]))
+            for a in added[:25]
+        ]
+        super().__init__(placeholder="Pick an alliance to remove", options=options, min_values=1, max_values=1)
+        self.menu_view = menu_view
+        self.event_id = event_id
+        self.names = names
+
+    async def callback(self, interaction: discord.Interaction):
+        aid = int(self.values[0])
+        kvkdb.remove_event_alliance(self.menu_view.cog.conn, self.event_id, aid)
+        await interaction.response.send_message(
+            f"{theme.verifiedIcon} Removed **{self.names.get(aid, aid)}**. "
+            f"Re-pick the event in the menu to refresh the card.", ephemeral=True)
 
 
 async def setup(bot):

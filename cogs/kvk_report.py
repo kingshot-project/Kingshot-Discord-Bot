@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from . import kvk_alliances
 from . import kvk_data as kvkdb
 from .kvk_util import format_speedups, generate_time_slots, rank_and_assign
 from .pimp_my_bot import theme
@@ -26,24 +27,6 @@ _MSG_CHAR_BUDGET = 3800  # Discord caps a Components-v2 message at 4000 display 
 _TYPE_COLOURS = [discord.Color.blurple(), discord.Color.green(), discord.Color.gold()]
 
 
-def _alliance_of(fid: int):
-    users = sqlite3.connect("db/users.sqlite")
-    try:
-        row = users.execute("SELECT alliance FROM users WHERE fid = ?", (fid,)).fetchone()
-        return str(row[0]) if row and row[0] is not None else None  # TEXT affinity, keep as str
-    finally:
-        users.close()
-
-
-def _alliance_id_of(fid: int):
-    """Resolve fid to an int alliance id, or None if unknown/non-numeric (an orphan)."""
-    aid = _alliance_of(fid)
-    try:
-        return int(aid) if aid is not None else None
-    except ValueError:
-        return None
-
-
 def _nicknames_for(fids: set) -> dict:
     """Batch-look-up nicknames for a set of fids. One query instead of one per fid."""
     if not fids:
@@ -63,10 +46,19 @@ def _fmt_minutes(minutes: int) -> str:
     return f"{hours}h {mins}m"
 
 
-def _group_label(scope: str, position_type: str, alliance_id: int) -> str:
-    if scope == "kingdom":
+def _alliance_names() -> dict:
+    """alliance_id -> name for every alliance the bot knows (for schedule labels)."""
+    return dict(kvk_alliances.list_alliances())
+
+
+def _alliance_label(alliance_id: int, names: dict) -> str:
+    return names.get(alliance_id, f"Alliance {alliance_id}")
+
+
+def _group_label(free_mode, position_type: str, alliance_id: int, names: dict) -> str:
+    if free_mode:
         return f"{position_type} - Kingdom"
-    return f"{position_type} - Alliance {alliance_id}"
+    return f"{position_type} - {_alliance_label(alliance_id, names)}"
 
 
 def _distinct_groups(conn, event_id) -> list:
@@ -79,18 +71,20 @@ def _distinct_groups(conn, event_id) -> list:
 
 
 def _skipped_fids(conn, event_id, ev: dict) -> list:
-    """Signed-up fids with no resolvable alliance, for alliance-scope events.
+    """Signed-up fids that cannot be placed in an alliance-based event: their alliance is not one of
+    the event's alliances (e.g. it was removed after they signed up, or they became unbound).
 
     Recomputed fresh from current signup data on every call (not cached on the cog), so it is
     always scoped to the one event being rendered and stays correct after Swap/Lock/Unlock/Clear
-    refreshes that do not re-run _compute.
+    refreshes that do not re-run _compute. Free-mode events place everyone, so none are skipped.
     """
-    if ev["scope"] != "alliance":
+    if ev["free_mode"]:
         return []
+    added = {a["alliance_id"] for a in kvkdb.get_event_alliances(conn, event_id)}
     skipped = []
     for position_type in kvkdb.get_active_types(conn, event_id):
         for s in kvkdb.get_signups(conn, event_id, position_type):
-            if _alliance_id_of(s["fid"]) is None:
+            if kvk_alliances.alliance_id_of(s["fid"]) not in added:
                 skipped.append(s["fid"])
     return skipped
 
@@ -148,10 +142,11 @@ def _add_paged_field(embeds: list, new_embed, used: int, name: str, value: str) 
     return used + field_len
 
 
-def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nicknames: dict) -> list:
+def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nicknames: dict,
+                 names: dict) -> list:
     """One or more embeds for a single position type, paged under Discord's 6000-char embed cap."""
     groups: list = []
-    if ev["scope"] == "kingdom":
+    if ev["free_mode"]:
         lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
         groups.append(("Kingdom", lines))
     else:
@@ -160,7 +155,7 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
             by_alliance.setdefault(r["alliance_id"], []).append(r)
         for aid in sorted(by_alliance):
             lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
-            groups.append((f"Alliance {aid}", lines))
+            groups.append((_alliance_label(aid, names), lines))
 
     title = f"{ev['name']} - {position_type}"
     cont_title = f"{title} (cont.)"
@@ -269,8 +264,8 @@ def _emit_layouts(layouts: list, title: str, blocks: list, colour) -> None:
 def _render_layouts(conn, event_id) -> list:
     """Build the published schedule as Components-v2 LayoutViews (one or more messages).
 
-    One accent colour per position type; kingdom scope is one text block, alliance scope is one
-    block per alliance separated by a divider. Skipped signups get a final orange note.
+    One accent colour per position type; free mode is one text block, alliance mode is one block
+    per alliance separated by a divider. Skipped signups get a final orange note.
     """
     ev = kvkdb.get_event(conn, event_id)
     if ev is None:
@@ -281,6 +276,7 @@ def _render_layouts(conn, event_id) -> list:
     metric_map = _metric_map(conn, event_id, ev)
     slots = kvkdb.get_slots(conn, event_id)
     nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
+    names = _alliance_names()
     by_type: dict = {}
     for row in slots:
         by_type.setdefault(row["position_type"], []).append(row)
@@ -290,7 +286,7 @@ def _render_layouts(conn, event_id) -> list:
         colour = _TYPE_COLOURS[i % len(_TYPE_COLOURS)]
         rows = by_type.get(position_type, [])
         blocks: list = []
-        if ev["scope"] == "kingdom":
+        if ev["free_mode"]:
             lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
             blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
         else:
@@ -302,7 +298,7 @@ def _render_layouts(conn, event_id) -> list:
                     blocks.append(("sep", ""))
                 lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
                 chunks = _chunk_lines(lines, _TEXT_CHUNK)
-                blocks.append(("text", f"**Alliance {aid}**\n{chunks[0]}"))
+                blocks.append(("text", f"**{_alliance_label(aid, names)}**\n{chunks[0]}"))
                 blocks.extend(("text", chunk) for chunk in chunks[1:])
         _emit_layouts(layouts, f"## {ev['name']} - {position_type}", blocks, colour)
 
@@ -334,20 +330,23 @@ class KvkReport(commands.Cog):
             if ev["pro_mode"] and position_type == "Training":
                 for s in signups:  # Pro-mode training ranks by computed KvK points, not raw speedups
                     s["score"] = s["kvk_points"] or 0
-            if ev["scope"] == "kingdom":
+            if ev["free_mode"]:
                 locks = kvkdb.get_locks(conn, event_id, position_type, 0)
                 groups[(position_type, 0)] = rank_and_assign(signups, full_day, slot_mode, locked=locks)
             else:
                 by_alliance: dict = {}
                 for s in signups:
-                    aid_int = _alliance_id_of(s["fid"])
+                    aid_int = kvk_alliances.alliance_id_of(s["fid"])
                     if aid_int is None:
-                        continue  # orphan: no alliance, or non-numeric alliance id
+                        continue  # unbound: cannot place (the signup gate should have blocked it)
                     by_alliance.setdefault(aid_int, []).append(s)
-                n = ev["slots_per_alliance"] or 0
-                for aid_int, group in by_alliance.items():
+                # Only the event's own alliances get slots, each with its own count. Non-added
+                # alliances are ignored here and reported by _skipped_fids.
+                for a in kvkdb.get_event_alliances(conn, event_id):
+                    aid_int, n = a["alliance_id"], a["slots"]
                     locks = kvkdb.get_locks(conn, event_id, position_type, aid_int)
-                    groups[(position_type, aid_int)] = rank_and_assign(group, n, slot_mode, locked=locks)
+                    groups[(position_type, aid_int)] = rank_and_assign(
+                        by_alliance.get(aid_int, []), n, slot_mode, locked=locks)
         return groups
 
     def _compute(self, conn, event_id) -> bool:
@@ -388,9 +387,11 @@ class KvkReport(commands.Cog):
         for row in slots:
             by_type.setdefault(row["position_type"], []).append(row)
 
+        names = _alliance_names()
         embeds = []
         for position_type in kvkdb.get_active_types(conn, event_id):
-            embeds.extend(_type_embeds(ev, position_type, by_type.get(position_type, []), metric_map, nicknames))
+            embeds.extend(_type_embeds(
+                ev, position_type, by_type.get(position_type, []), metric_map, nicknames, names))
 
         skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
         if skipped:
@@ -488,7 +489,7 @@ class KvkReport(commands.Cog):
             return
         ev = kvkdb.get_event(sched.conn, event_id)
         embeds = self._render_embeds(sched.conn, event_id)
-        view = _OverrideView(self, sched.conn, event_id, ev["scope"])
+        view = _OverrideView(self, sched.conn, event_id, ev["free_mode"])
         first = embeds[:_MAX_EMBEDS_PER_MESSAGE]
         if edit:
             await interaction.response.edit_message(content=None, embeds=first, view=view)
@@ -539,7 +540,8 @@ class _GroupSelect(discord.ui.Select):
     def __init__(self, override_view: "_OverrideView", groups: list):
         options = [
             discord.SelectOption(
-                label=_group_label(override_view.scope, ptype, aid), value=f"{ptype}|{aid}",
+                label=_group_label(override_view.free_mode, ptype, aid, override_view.names),
+                value=f"{ptype}|{aid}",
                 default=(ptype == override_view.selected_type
                          and aid == override_view.selected_alliance))  # stay shown after a refresh
             for ptype, aid in groups
@@ -598,12 +600,13 @@ class _SwapModal(discord.ui.Modal, title="Swap Slots"):
 class _OverrideView(discord.ui.View):
     """Admin controls to tweak an auto-assigned KvK report before publishing (Task 7)."""
 
-    def __init__(self, report_cog: KvkReport, conn, event_id: int, scope: str):
+    def __init__(self, report_cog: KvkReport, conn, event_id: int, free_mode: int):
         super().__init__(timeout=VIEW_TIMEOUT)
         self.report_cog = report_cog
         self.conn = conn
         self.event_id = event_id
-        self.scope = scope
+        self.free_mode = free_mode
+        self.names = _alliance_names()
         self.selected_type: str | None = None
         self.selected_alliance: int | None = None
         self.groups: list = []
@@ -615,7 +618,7 @@ class _OverrideView(discord.ui.View):
         A Discord select must have 1-25 options, so the group select (and the buttons that
         depend on a selected group) are only added when at least one group exists. Called from
         __init__ and again from _refresh so the controls stay in sync after Re-run changes which
-        groups exist (e.g. the first signup for a previously-empty alliance-scope event).
+        groups exist (e.g. the first signup for a previously-empty alliance).
         """
         self.clear_items()
         self.groups = _distinct_groups(self.conn, self.event_id)

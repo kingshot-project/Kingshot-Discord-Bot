@@ -1313,9 +1313,9 @@ class _AllianceSlotsModal(discord.ui.Modal, title="Alliance seats"):
             return
         ev = kvkdb.get_event(conn, self.event_id)
         grid = len(generate_time_slots(ev["slot_mode"])) if ev else len(generate_time_slots(0))
-        if chief > grid or noble > grid:  # each seat schedule uses its own day grid
+        if chief + noble > grid:  # Noble + Chief seats share the one day grid on the Training report
             await interaction.response.send_message(
-                f"Each seat count must be at most the {grid}-slot day grid.", ephemeral=True)
+                f"Chief + Noble seats ({chief + noble}) exceed the {grid}-slot day grid.", ephemeral=True)
             return
         kvkdb.add_event_alliance(conn, self.event_id, self.alliance_id, chief, noble)
         await interaction.response.send_message(

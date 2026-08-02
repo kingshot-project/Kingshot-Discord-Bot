@@ -105,6 +105,20 @@ def _fmt_minutes(minutes: int) -> str:
     return f"{hours}h {mins}m"
 
 
+def _seat_points(conn, event_id, ev) -> dict:
+    """(fid, role) -> Training seat KvK points for a Pro event: Noble uses the stored (+50%) value,
+    Chief is recomputed at +10%. Empty for non-pro events. Keyed by (fid, role) and computed from
+    signups (not the slot row) so a manual Swap - which moves a fid to a different seat - shows the
+    right number without a Re-run."""
+    if not ev["pro_mode"]:
+        return {}
+    points: dict = {}
+    for s in kvkdb.get_signups(conn, event_id, "Training"):
+        points[(s["fid"], "noble")] = s.get("kvk_points") or 0
+        points[(s["fid"], "chief")] = _chief_points(s)
+    return points
+
+
 def _alliance_names() -> dict:
     """alliance_id -> name for every alliance the bot knows (for schedule labels)."""
     return dict(kvk_alliances.list_alliances())
@@ -177,14 +191,17 @@ def _metric_map(conn, event_id, ev) -> dict:
     return metrics
 
 
-def _slot_line(row: dict, position_type: str, metric_map: dict, nicknames: dict) -> str:
+def _slot_line(row: dict, position_type: str, metric_map: dict, nicknames: dict, seat_points: dict) -> str:
     if row["fid"] is None:
         return f"{row['slot_time']} - (empty)"
     nickname = nicknames.get(row["fid"], f"Unknown ({row['fid']})")
-    # A Pro training seat carries its own seat-specific points (Noble +50% vs Chief +10%); otherwise
-    # fall back to the shared metric (speedups, or the stored KvK points).
-    metric = f"{row['points']:,} pts" if row.get("points") is not None \
-        else metric_map.get((row["fid"], position_type), "?")
+    # A Pro training seat's points depend on its role (Noble +50% vs Chief +10%) and current occupant,
+    # looked up by (fid, role) so a Swap stays correct; otherwise use the shared metric (speedups).
+    role = row.get("role", "")
+    if role and (row["fid"], role) in seat_points:
+        metric = f"{seat_points[(row['fid'], role)]:,} pts"
+    else:
+        metric = metric_map.get((row["fid"], position_type), "?")
     lock = f" {_LOCK_MARK}" if row["locked"] else ""
     return f"{row['slot_time']} - {nickname} ({row['fid']}) - {metric}{lock}"
 
@@ -205,11 +222,11 @@ def _add_paged_field(embeds: list, new_embed, used: int, name: str, value: str) 
 
 
 def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nicknames: dict,
-                 names: dict) -> list:
+                 names: dict, seat_points: dict) -> list:
     """One or more embeds for a single position type, paged under Discord's 6000-char embed cap."""
     groups: list = []
     if ev["free_mode"]:
-        lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
+        lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in rows]
         groups.append(("Kingdom", lines))
     else:
         by_group: dict = {}  # (alliance_id, role) -> rows; role splits Training into Noble/Chief
@@ -219,7 +236,7 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
             label = _alliance_label(aid, names)
             if role:
                 label += f" - {_ROLE_LABEL.get(role, role)}"
-            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_group[(aid, role)]]
+            lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in by_group[(aid, role)]]
             groups.append((label, lines))
 
     title = f"{ev['name']} - {position_type}"
@@ -339,6 +356,7 @@ def _render_layouts(conn, event_id) -> list:
         return [_ScheduleLayout(container)]
 
     metric_map = _metric_map(conn, event_id, ev)
+    seat_points = _seat_points(conn, event_id, ev)
     slots = kvkdb.get_slots(conn, event_id)
     nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
     names = _alliance_names()
@@ -352,7 +370,7 @@ def _render_layouts(conn, event_id) -> list:
         rows = by_type.get(position_type, [])
         blocks: list = []
         if ev["free_mode"]:
-            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
+            lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in rows]
             blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
         else:
             by_group: dict = {}  # (alliance_id, role) -> rows; role splits Training into Noble/Chief
@@ -365,7 +383,8 @@ def _render_layouts(conn, event_id) -> list:
                 heading = _alliance_label(aid, names)
                 if role:
                     heading += f" - {_ROLE_LABEL.get(role, role)}"
-                lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_group[(aid, role)]]
+                lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points)
+                         for r in by_group[(aid, role)]]
                 chunks = _chunk_lines(lines, _TEXT_CHUNK)
                 blocks.append(("text", f"**{heading}**\n{chunks[0]}"))
                 blocks.extend(("text", chunk) for chunk in chunks[1:])
@@ -457,6 +476,7 @@ class KvkReport(commands.Cog):
                 title="Unknown event", description=f"No event with id {event_id}.", color=discord.Color.red())]
 
         metric_map = _metric_map(conn, event_id, ev)
+        seat_points = _seat_points(conn, event_id, ev)
         if slots is None:
             slots = kvkdb.get_slots(conn, event_id)
         nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
@@ -469,7 +489,8 @@ class KvkReport(commands.Cog):
         embeds = []
         for position_type in kvkdb.get_active_types(conn, event_id):
             embeds.extend(_type_embeds(
-                ev, position_type, by_type.get(position_type, []), metric_map, nicknames, names))
+                ev, position_type, by_type.get(position_type, []), metric_map, nicknames, names,
+                seat_points))
 
         skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
         if skipped:

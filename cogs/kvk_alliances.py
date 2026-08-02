@@ -18,7 +18,8 @@ def list_alliances() -> list[tuple[int, str]]:
         rows = con.execute("SELECT alliance_id, name FROM alliance_list ORDER BY alliance_id").fetchall()
     finally:
         con.close()
-    return [(int(aid), name) for aid, name in rows]
+    # name is a nullable TEXT column; fall back to the id so callers never handle None.
+    return [(int(aid), name if name is not None else f"Alliance {aid}") for aid, name in rows]
 
 
 def alliance_id_of(fid: int):

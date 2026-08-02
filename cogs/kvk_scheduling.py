@@ -401,11 +401,14 @@ class _KvkWizardView(discord.ui.View):
             return
 
         type_dates = type_dates_for(d.event_date, d.active_types)
+        # New events start in free mode so the announcement that posts now is valid for everyone;
+        # the admin can switch to alliance-based and add alliances afterwards.
         event_id = kvkdb.create_event(
             self.cog.conn,
             guild_id=d.guild_id,
             name=d.name,
             event_date=d.event_date,
+            free_mode=1,
             slot_mode=d.slot_mode,
             signup_open_at=d.signup_open_at,
             signup_close_at=d.signup_close_at,
@@ -438,7 +441,8 @@ class _KvkWizardView(discord.ui.View):
                 name="Announcement",
                 value="The bot could not post to that channel. Check its permissions there.", inline=False)
         result_embed.set_footer(
-            text="Next: pick this event in the KvK menu, then Add alliance or Toggle free registration.")
+            text="Open registration by default. To limit to specific alliances: pick this event in the "
+                 "KvK menu, Switch to alliances, then Add alliance.")
         await interaction.response.edit_message(embed=result_embed, view=None)
 
 
@@ -1022,7 +1026,8 @@ class _KvkMenuView(discord.ui.View):
         names = dict(kvk_alliances.list_alliances())
         lines = "\n".join(
             f"- {names.get(a['alliance_id'], a['alliance_id'])}: {a['slots']} slots" for a in added)
-        return f"Alliance-based\n{lines}"
+        text = f"Alliance-based\n{lines}"
+        return text if len(text) <= 1000 else text[:990] + "\n... (more)"  # stay under the 1024 field cap
 
     def _add_event_fields(self, embed: discord.Embed) -> None:
         """Structured details of the selected event, as embed fields for readability."""
@@ -1230,6 +1235,13 @@ class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
             return
         if slots <= 0:
             await interaction.response.send_message("Slots must be a positive number.", ephemeral=True)
+            return
+        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        max_slots = len(generate_time_slots(ev["slot_mode"])) if ev else len(generate_time_slots(0))
+        if slots > max_slots:
+            await interaction.response.send_message(
+                f"Slots ({slots}) is more than the {max_slots}-slot day grid. Pick {max_slots} or fewer.",
+                ephemeral=True)
             return
         kvkdb.add_event_alliance(self.cog.conn, self.event_id, self.alliance_id, slots)
         await interaction.response.send_message(

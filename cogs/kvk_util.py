@@ -77,12 +77,17 @@ KVK_TRAIN_TIME = {1: 12, 2: 17, 3: 24, 4: 32, 5: 44, 6: 60, 7: 83, 8: 113, 9: 13
 KVK_POINTS = {1: 3, 2: 4, 3: 5, 4: 8, 5: 12, 6: 18, 7: 25, 8: 35, 9: 45, 10: 60, 11: 75}
 MAX_TROOP_LEVEL = 11
 
-# Training-speed bonuses shared by every player on the Training day, on top of a player's own speed.
-# All training-speed bonuses stack additively into one percentage (e.g. own 202.9 + 105 = 307.9%).
+# Training-speed bonuses that stack additively on a player's own speed. Kingdom + KvK apply to
+# everyone; the position bonus depends on the seat held on the Training day: Noble Advisor gives +50%,
+# Chief Minister gives +10%. SHARED_TRAINING_BONUS keeps the Noble total (105) - it is the best case
+# used at signup; CHIEF_TRAINING_BONUS (65) is applied when a player is placed in a Chief seat instead.
 KINGDOM_SKILL_BONUS = 30.0
 KVK_EVENT_BONUS = 25.0
-POSITION_TRAINING_BONUS = 50.0
-SHARED_TRAINING_BONUS = KINGDOM_SKILL_BONUS + KVK_EVENT_BONUS + POSITION_TRAINING_BONUS  # 105.0
+NOBLE_ADVISOR_BONUS = 50.0
+CHIEF_MINISTER_BONUS = 10.0
+_SHARED_BASE = KINGDOM_SKILL_BONUS + KVK_EVENT_BONUS  # 55.0
+SHARED_TRAINING_BONUS = _SHARED_BASE + NOBLE_ADVISOR_BONUS   # 105.0 (Noble seat / signup best case)
+CHIEF_TRAINING_BONUS = _SHARED_BASE + CHIEF_MINISTER_BONUS   # 65.0 (Chief seat)
 
 _COUNT_SUFFIX = {"k": 1000, "к": 1000, "m": 1_000_000, "м": 1_000_000}  # Latin + Cyrillic k/m
 
@@ -300,3 +305,60 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
          "fid": assigned.get(i), "locked": 1 if i in locked else 0}
         for i in range(slot_count)
     ]
+
+
+def assign_two_tier(players, noble_slots, chief_slots):
+    """Place Training-day players into Noble Advisor and Chief Minister seats to MAXIMISE total KvK
+    points. Each player carries "noble_points" (points in a Noble seat, +50%) and "chief_points" (in a
+    Chief seat, +10%), with noble_points >= chief_points. There are noble_slots Noble and chief_slots
+    Chief seats; surplus players are dropped. Returns (noble, chief): the assigned player dicts, each
+    list sorted by that seat's points descending.
+
+    A player is always worth more in a Noble seat, but the *gain* of Noble over Chief differs per
+    player, so "top by points -> Noble" is not always optimal. An exact DP over (noble used, chief
+    used) - O(players * noble_slots * chief_slots) - finds the maximum.
+    """
+    n = max(0, int(noble_slots))
+    c = max(0, int(chief_slots))
+    neg = float("-inf")
+    dp = [[neg] * (c + 1) for _ in range(n + 1)]
+    dp[0][0] = 0.0
+    choices = []  # per player: {reached_state: "noble"|"chief"} (absence of an entry means "skip")
+    for player in players:
+        gain_n = player["noble_points"]
+        gain_c = player["chief_points"]
+        ndp = [row[:] for row in dp]  # start from "skip", then try to improve with a seat
+        chosen: dict = {}
+        for nu in range(n + 1):
+            for cu in range(c + 1):
+                base = dp[nu][cu]
+                if base == neg:
+                    continue
+                if nu < n and base + gain_n > ndp[nu + 1][cu]:
+                    ndp[nu + 1][cu] = base + gain_n
+                    chosen[(nu + 1, cu)] = "noble"
+                if cu < c and base + gain_c > ndp[nu][cu + 1]:
+                    ndp[nu][cu + 1] = base + gain_c
+                    chosen[(nu, cu + 1)] = "chief"
+        dp = ndp
+        choices.append(chosen)
+
+    best, best_nu, best_cu = neg, 0, 0
+    for nu in range(n + 1):
+        for cu in range(c + 1):
+            if dp[nu][cu] > best:
+                best, best_nu, best_cu = dp[nu][cu], nu, cu
+
+    noble, chief = [], []
+    nu, cu = best_nu, best_cu
+    for i in range(len(players) - 1, -1, -1):
+        action = choices[i].get((nu, cu))
+        if action == "noble":
+            noble.append(players[i])
+            nu -= 1
+        elif action == "chief":
+            chief.append(players[i])
+            cu -= 1
+    noble.sort(key=lambda p: -p["noble_points"])
+    chief.sort(key=lambda p: -p["chief_points"])
+    return noble, chief

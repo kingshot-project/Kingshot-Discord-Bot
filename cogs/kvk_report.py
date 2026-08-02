@@ -7,8 +7,62 @@ from discord.ext import commands
 
 from . import kvk_alliances
 from . import kvk_data as kvkdb
-from .kvk_util import format_speedups, generate_time_slots, rank_and_assign
+from .kvk_util import (
+    CHIEF_TRAINING_BONUS,
+    assign_two_tier,
+    compute_training_points,
+    format_speedups,
+    generate_time_slots,
+    rank_and_assign,
+    troop_tier,
+)
 from .pimp_my_bot import theme
+
+_ROLE_LABEL = {"noble": "Noble Advisor", "chief": "Chief Minister"}
+_ROLE_ORDER = {"noble": 0, "chief": 1, "": 2}  # Noble seats listed first
+
+
+def _chief_points(s) -> int:
+    """A player's KvK points in a Chief seat (+10%) instead of the stored Noble value (+50%)."""
+    if not s.get("base_level"):
+        return s.get("kvk_points") or 0
+    try:
+        return compute_training_points(
+            troop_tier(s["base_level"]), s["speedup_minutes"], s.get("upgrade_from"),
+            s.get("upgrade_count") or 0, (s.get("training_speed") or 0) + CHIEF_TRAINING_BONUS,
+        )["kvk_points"]
+    except (ValueError, KeyError):
+        return s.get("kvk_points") or 0
+
+
+def _training_rows(members, chief_slots, noble_slots, slot_mode, pro):
+    """Noble + Chief seat rows for a Training group. Pro events place players to maximise total KvK
+    points (Noble +50%, Chief +10%); standard events place by speedups. Noble seats take slot indices
+    0..noble-1, Chief seats noble..noble+chief-1; each row carries its role and per-seat points."""
+    times = generate_time_slots(slot_mode)
+    if pro:
+        players = [{**s, "noble_points": s.get("kvk_points") or 0, "chief_points": _chief_points(s)}
+                   for s in members]
+        noble, chief = assign_two_tier(players, noble_slots, chief_slots)
+    else:
+        ranked = sorted(members, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+        noble, chief = ranked[:noble_slots], ranked[noble_slots:noble_slots + chief_slots]
+
+    rows = []
+    for i in range(noble_slots):
+        p = noble[i] if i < len(noble) else None
+        rows.append({
+            "slot_index": i, "slot_time": times[i] if i < len(times) else "", "role": "noble",
+            "fid": p["fid"] if p else None, "locked": 0,
+            "points": p["noble_points"] if (p and pro) else None})
+    for j in range(chief_slots):
+        idx = noble_slots + j
+        p = chief[j] if j < len(chief) else None
+        rows.append({
+            "slot_index": idx, "slot_time": times[idx] if idx < len(times) else "", "role": "chief",
+            "fid": p["fid"] if p else None, "locked": 0,
+            "points": p["chief_points"] if (p and pro) else None})
+    return rows
 
 # Position-type markers for the signups list.
 _POSITION_ICON = {
@@ -122,7 +176,10 @@ def _slot_line(row: dict, position_type: str, metric_map: dict, nicknames: dict)
     if row["fid"] is None:
         return f"{row['slot_time']} - (empty)"
     nickname = nicknames.get(row["fid"], f"Unknown ({row['fid']})")
-    metric = metric_map.get((row["fid"], position_type), "?")
+    # A Pro training seat carries its own seat-specific points (Noble +50% vs Chief +10%); otherwise
+    # fall back to the shared metric (speedups, or the stored KvK points).
+    metric = f"{row['points']:,} pts" if row.get("points") is not None \
+        else metric_map.get((row["fid"], position_type), "?")
     lock = f" {_LOCK_MARK}" if row["locked"] else ""
     return f"{row['slot_time']} - {nickname} ({row['fid']}) - {metric}{lock}"
 
@@ -150,12 +207,15 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
         lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
         groups.append(("Kingdom", lines))
     else:
-        by_alliance: dict = {}
+        by_group: dict = {}  # (alliance_id, role) -> rows; role splits Training into Noble/Chief
         for r in rows:
-            by_alliance.setdefault(r["alliance_id"], []).append(r)
-        for aid in sorted(by_alliance):
-            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
-            groups.append((_alliance_label(aid, names), lines))
+            by_group.setdefault((r["alliance_id"], r.get("role", "")), []).append(r)
+        for aid, role in sorted(by_group, key=lambda k: (k[0], _ROLE_ORDER.get(k[1], 9))):
+            label = _alliance_label(aid, names)
+            if role:
+                label += f" - {_ROLE_LABEL.get(role, role)}"
+            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_group[(aid, role)]]
+            groups.append((label, lines))
 
     title = f"{ev['name']} - {position_type}"
     cont_title = f"{title} (cont.)"
@@ -290,15 +350,19 @@ def _render_layouts(conn, event_id) -> list:
             lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
             blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
         else:
-            by_alliance: dict = {}
+            by_group: dict = {}  # (alliance_id, role) -> rows; role splits Training into Noble/Chief
             for r in rows:
-                by_alliance.setdefault(r["alliance_id"], []).append(r)
-            for pos, aid in enumerate(sorted(by_alliance)):
-                if pos:  # a divider before every alliance after the first
+                by_group.setdefault((r["alliance_id"], r.get("role", "")), []).append(r)
+            ordered = sorted(by_group, key=lambda k: (k[0], _ROLE_ORDER.get(k[1], 9)))
+            for pos, (aid, role) in enumerate(ordered):
+                if pos:  # a divider before every section after the first
                     blocks.append(("sep", ""))
-                lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
+                heading = _alliance_label(aid, names)
+                if role:
+                    heading += f" - {_ROLE_LABEL.get(role, role)}"
+                lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_group[(aid, role)]]
                 chunks = _chunk_lines(lines, _TEXT_CHUNK)
-                blocks.append(("text", f"**{_alliance_label(aid, names)}**\n{chunks[0]}"))
+                blocks.append(("text", f"**{heading}**\n{chunks[0]}"))
                 blocks.extend(("text", chunk) for chunk in chunks[1:])
         _emit_layouts(layouts, f"## {ev['name']} - {position_type}", blocks, colour)
 
@@ -327,10 +391,11 @@ class KvkReport(commands.Cog):
         groups: dict = {}
         for position_type in kvkdb.get_active_types(conn, event_id):
             signups = kvkdb.get_signups(conn, event_id, position_type)
-            if ev["pro_mode"] and position_type == "Training":
-                for s in signups:  # Pro-mode training ranks by computed KvK points, not raw speedups
-                    s["score"] = s["kvk_points"] or 0
+            pro_training = bool(ev["pro_mode"]) and position_type == "Training"
             if ev["free_mode"]:
+                if pro_training:
+                    for s in signups:  # kingdom pool ranks by computed KvK points, not raw speedups
+                        s["score"] = s["kvk_points"] or 0
                 locks = kvkdb.get_locks(conn, event_id, position_type, 0)
                 groups[(position_type, 0)] = rank_and_assign(signups, full_day, slot_mode, locked=locks)
             else:
@@ -340,13 +405,20 @@ class KvkReport(commands.Cog):
                     if aid_int is None:
                         continue  # unbound: cannot place (the signup gate should have blocked it)
                     by_alliance.setdefault(aid_int, []).append(s)
-                # Only the event's own alliances get slots, each with its own count. Non-added
-                # alliances are ignored here and reported by _skipped_fids.
+                # Each of the event's alliances gets its own seats; non-added alliances are ignored
+                # here and reported by _skipped_fids.
                 for a in kvkdb.get_event_alliances(conn, event_id):
-                    aid_int, n = a["alliance_id"], a["slots"]
-                    locks = kvkdb.get_locks(conn, event_id, position_type, aid_int)
-                    groups[(position_type, aid_int)] = rank_and_assign(
-                        by_alliance.get(aid_int, []), n, slot_mode, locked=locks)
+                    aid_int = a["alliance_id"]
+                    members = by_alliance.get(aid_int, [])
+                    if position_type == "Training":
+                        # Training day = Noble Advisor + Chief Minister seats.
+                        groups[(position_type, aid_int)] = _training_rows(
+                            members, a["chief_slots"], a["noble_slots"], slot_mode, pro_training)
+                    else:
+                        # Building/Research = Chief Minister seats only.
+                        locks = kvkdb.get_locks(conn, event_id, position_type, aid_int)
+                        groups[(position_type, aid_int)] = rank_and_assign(
+                            members, a["chief_slots"], slot_mode, locked=locks)
         return groups
 
     def _compute(self, conn, event_id) -> bool:
@@ -365,7 +437,8 @@ class KvkReport(commands.Cog):
             for r in rows:
                 slots.append({
                     "position_type": position_type, "alliance_id": aid, "slot_index": r["slot_index"],
-                    "slot_time": r["slot_time"], "fid": r["fid"], "locked": r["locked"]})
+                    "slot_time": r["slot_time"], "fid": r["fid"], "locked": r["locked"],
+                    "role": r.get("role", ""), "points": r.get("points")})
         return self._render_embeds(conn, event_id, slots=slots)
 
     def _render_embeds(self, conn, event_id, slots=None) -> list:

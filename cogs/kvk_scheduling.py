@@ -808,7 +808,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         steps = [
             f"`1)` Speedups: **{format_speedups(hours_minutes)}** = {r['total_seconds']:,} s",
             f"`2)` Training speed: {personal_speed:g}% + {SHARED_TRAINING_BONUS:g}% "
-            f"(kingdom/KvK/position) = **{total_speed:g}%**",
+            f"(kingdom/KvK/Noble seat) = **{total_speed:g}%**",
             f"`3)` Effective time: {r['total_seconds']:,} x {r['speed_mult']:.3f} "
             f"= **{r['effective_seconds']:,} s** (training speed stretches your speedups)",
         ]
@@ -1091,8 +1091,9 @@ class _KvkMenuView(discord.ui.View):
             return "Alliance-based - no alliances added yet (use Add alliance)"
         names = dict(kvk_alliances.list_alliances())
         lines = "\n".join(
-            f"- {names.get(a['alliance_id'], a['alliance_id'])}: {a['slots']} slots" for a in added)
-        text = f"Alliance-based\n{lines}"
+            f"- {names.get(a['alliance_id'], a['alliance_id'])}: "
+            f"{a['chief_slots']} chief / {a['noble_slots']} noble" for a in added)
+        text = f"Alliance-based (Training = chief + noble seats)\n{lines}"
         return text if len(text) <= 1000 else text[:990] + "\n... (more)"  # stay under the 1024 field cap
 
     def _add_event_fields(self, embed: discord.Embed) -> None:
@@ -1284,37 +1285,42 @@ class _AddAllianceSelect(discord.ui.Select):
             _AllianceSlotsModal(self.menu_view, self.event_id, aid, self.names.get(aid, str(aid))))
 
 
-class _AllianceSlotsModal(discord.ui.Modal, title="Alliance slots"):
+class _AllianceSlotsModal(discord.ui.Modal, title="Alliance seats"):
     def __init__(self, menu_view: _KvkMenuView, event_id: int, alliance_id: int, alliance_name: str):
         super().__init__()
         self.menu_view = menu_view
         self.event_id = event_id
         self.alliance_id = alliance_id
         self.alliance_name = alliance_name
-        self.slots_input = discord.ui.TextInput(
-            label=f"Slots for {alliance_name}"[:45], placeholder="10", max_length=4)
-        self.add_item(self.slots_input)
+        self.chief_input = discord.ui.TextInput(
+            label="Chief Minister seats (Tr/Re/Bu)"[:45], placeholder="10", max_length=4)
+        self.add_item(self.chief_input)
+        self.noble_input = discord.ui.TextInput(
+            label="Noble Advisor seats (Training)"[:45], placeholder="3", max_length=4)
+        self.add_item(self.noble_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = self.menu_view.cog.conn
         try:
-            slots = int(self.slots_input.value.strip())
+            chief = int(self.chief_input.value.strip())
+            noble = int(self.noble_input.value.strip())
         except ValueError:
-            await interaction.response.send_message("Slots must be a whole number.", ephemeral=True)
+            await interaction.response.send_message("Both seat counts must be whole numbers.", ephemeral=True)
             return
-        if slots <= 0:
-            await interaction.response.send_message("Slots must be a positive number.", ephemeral=True)
+        if chief < 0 or noble < 0 or chief + noble == 0:
+            await interaction.response.send_message(
+                "Seat counts cannot be negative, and at least one must be above zero.", ephemeral=True)
             return
         ev = kvkdb.get_event(conn, self.event_id)
-        max_slots = len(generate_time_slots(ev["slot_mode"])) if ev else len(generate_time_slots(0))
-        if slots > max_slots:
+        grid = len(generate_time_slots(ev["slot_mode"])) if ev else len(generate_time_slots(0))
+        if chief > grid or noble > grid:  # each seat schedule uses its own day grid
             await interaction.response.send_message(
-                f"Slots ({slots}) is more than the {max_slots}-slot day grid. Pick {max_slots} or fewer.",
-                ephemeral=True)
+                f"Each seat count must be at most the {grid}-slot day grid.", ephemeral=True)
             return
-        kvkdb.add_event_alliance(conn, self.event_id, self.alliance_id, slots)
+        kvkdb.add_event_alliance(conn, self.event_id, self.alliance_id, chief, noble)
         await interaction.response.send_message(
-            f"{theme.verifiedIcon} Added **{self.alliance_name}** with {slots} slots.", ephemeral=True)
+            f"{theme.verifiedIcon} Added **{self.alliance_name}**: {chief} chief / {noble} noble seats.",
+            ephemeral=True)
         await self.menu_view.refresh_card()  # update the menu card in place
 
 
@@ -1334,7 +1340,8 @@ class _RemoveAllianceSelect(discord.ui.Select):
     def __init__(self, menu_view: _KvkMenuView, event_id: int, added: list, names: dict):
         options = [
             discord.SelectOption(
-                label=f"{names.get(a['alliance_id'], a['alliance_id'])} ({a['slots']} slots)"[:100],
+                label=f"{names.get(a['alliance_id'], a['alliance_id'])} "
+                      f"({a['chief_slots']} chief / {a['noble_slots']} noble)"[:100],
                 value=str(a["alliance_id"]))
             for a in added[:25]
         ]

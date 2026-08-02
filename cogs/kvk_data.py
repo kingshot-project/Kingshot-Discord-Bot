@@ -27,7 +27,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             pro_mode INTEGER NOT NULL DEFAULT 0, free_mode INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS kvk_event_alliances (
-            event_id INTEGER NOT NULL, alliance_id INTEGER NOT NULL, slots INTEGER NOT NULL,
+            event_id INTEGER NOT NULL, alliance_id INTEGER NOT NULL,
+            chief_slots INTEGER NOT NULL DEFAULT 0, noble_slots INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (event_id, alliance_id)
         );
         CREATE TABLE IF NOT EXISTS kvk_event_types (
@@ -46,6 +47,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             event_id INTEGER NOT NULL, position_type TEXT NOT NULL,
             alliance_id INTEGER NOT NULL DEFAULT 0, slot_index INTEGER NOT NULL,
             slot_time TEXT NOT NULL, fid INTEGER, locked INTEGER NOT NULL DEFAULT 0,
+            role TEXT NOT NULL DEFAULT '', points INTEGER,
             PRIMARY KEY (event_id, position_type, alliance_id, slot_index)
         );
         """
@@ -59,6 +61,18 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column(conn, "kvk_signups", "training_speed", "REAL")
     _add_column(conn, "kvk_events", "pro_mode", "INTEGER NOT NULL DEFAULT 0")
     _add_column(conn, "kvk_events", "free_mode", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "kvk_slots", "role", "TEXT NOT NULL DEFAULT ''")   # 'noble'/'chief' for Pro training
+    _add_column(conn, "kvk_slots", "points", "INTEGER")                  # seat-specific KvK points
+    # kvk_event_alliances gained chief_slots/noble_slots (the Chief/Noble seat split), replacing a
+    # single `slots` column. That old config is meaningless under the split, so rebuild the table when
+    # it predates it (it holds only per-event config and is empty in practice).
+    ea_cols = {r[1] for r in conn.execute("PRAGMA table_info(kvk_event_alliances)")}
+    if "chief_slots" not in ea_cols:
+        conn.execute("DROP TABLE kvk_event_alliances")
+        conn.execute(
+            "CREATE TABLE kvk_event_alliances (event_id INTEGER NOT NULL, alliance_id INTEGER NOT NULL, "
+            "chief_slots INTEGER NOT NULL DEFAULT 0, noble_slots INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (event_id, alliance_id))")
     conn.commit()
 
 
@@ -151,12 +165,13 @@ def set_free_mode(conn, event_id, free_mode) -> None:
     conn.commit()
 
 
-def add_event_alliance(conn, event_id, alliance_id, slots) -> None:
-    """Add (or update the slot count of) an alliance taking part in an event."""
+def add_event_alliance(conn, event_id, alliance_id, chief_slots, noble_slots) -> None:
+    """Add (or update the Chief/Noble seat counts of) an alliance taking part in an event."""
     conn.execute(
-        "INSERT INTO kvk_event_alliances (event_id, alliance_id, slots) VALUES (?, ?, ?) "
-        "ON CONFLICT (event_id, alliance_id) DO UPDATE SET slots = excluded.slots",
-        (event_id, int(alliance_id), int(slots)))
+        "INSERT INTO kvk_event_alliances (event_id, alliance_id, chief_slots, noble_slots) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT (event_id, alliance_id) DO UPDATE SET "
+        "chief_slots = excluded.chief_slots, noble_slots = excluded.noble_slots",
+        (event_id, int(alliance_id), int(chief_slots), int(noble_slots)))
     conn.commit()
 
 
@@ -168,11 +183,11 @@ def remove_event_alliance(conn, event_id, alliance_id) -> None:
 
 
 def get_event_alliances(conn, event_id) -> list:
-    """The alliances taking part in an event, as [{'alliance_id', 'slots'}], ordered by alliance id."""
+    """Alliances in an event, as [{'alliance_id', 'chief_slots', 'noble_slots'}], ordered by id."""
     rows = conn.execute(
-        "SELECT alliance_id, slots FROM kvk_event_alliances WHERE event_id = ? ORDER BY alliance_id",
-        (event_id,)).fetchall()
-    return [{"alliance_id": r[0], "slots": r[1]} for r in rows]
+        "SELECT alliance_id, chief_slots, noble_slots FROM kvk_event_alliances WHERE event_id = ? "
+        "ORDER BY alliance_id", (event_id,)).fetchall()
+    return [{"alliance_id": r[0], "chief_slots": r[1], "noble_slots": r[2]} for r in rows]
 
 
 def upsert_signup(conn, event_id, fid, position_type, speedup_minutes, submitted_by, submitted_at) -> None:
@@ -233,10 +248,11 @@ def save_slots(conn, event_id, position_type, alliance_id, rows) -> None:
     conn.execute("DELETE FROM kvk_slots WHERE event_id = ? AND position_type = ? AND alliance_id = ?",
                  (event_id, position_type, alliance_id))
     conn.executemany(
-        """INSERT INTO kvk_slots (event_id, position_type, alliance_id, slot_index, slot_time, fid, locked)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        [(event_id, position_type, alliance_id, r["slot_index"], r["slot_time"], r["fid"], r.get("locked", 0))
-         for r in rows])
+        """INSERT INTO kvk_slots (event_id, position_type, alliance_id, slot_index, slot_time, fid,
+           locked, role, points)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [(event_id, position_type, alliance_id, r["slot_index"], r["slot_time"], r["fid"],
+          r.get("locked", 0), r.get("role", ""), r.get("points")) for r in rows])
     conn.commit()
 
 
@@ -258,8 +274,8 @@ def get_locks(conn, event_id, position_type, alliance_id):
 
 def get_slots(conn, event_id):
     rows = conn.execute(
-        """SELECT position_type, alliance_id, slot_index, slot_time, fid, locked
+        """SELECT position_type, alliance_id, slot_index, slot_time, fid, locked, role, points
            FROM kvk_slots WHERE event_id = ? ORDER BY position_type, alliance_id, slot_index""",
         (event_id,)).fetchall()
-    keys = ("position_type", "alliance_id", "slot_index", "slot_time", "fid", "locked")
+    keys = ("position_type", "alliance_id", "slot_index", "slot_time", "fid", "locked", "role", "points")
     return [dict(zip(keys, r, strict=True)) for r in rows]

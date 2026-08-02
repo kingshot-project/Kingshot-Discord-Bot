@@ -23,15 +23,17 @@ def test_free_mode_and_event_alliances():
     kvk.set_free_mode(c, eid, False)
     assert kvk.get_event(c, eid)["free_mode"] == 0
 
-    kvk.add_event_alliance(c, eid, 1, 10)
-    kvk.add_event_alliance(c, eid, 2, 5)
+    kvk.add_event_alliance(c, eid, 1, 10, 3)  # chief=10, noble=3
+    kvk.add_event_alliance(c, eid, 2, 5, 2)
     assert kvk.get_event_alliances(c, eid) == [
-        {"alliance_id": 1, "slots": 10}, {"alliance_id": 2, "slots": 5}]
-    kvk.add_event_alliance(c, eid, 1, 8)  # same alliance -> updates its slot count, no duplicate
+        {"alliance_id": 1, "chief_slots": 10, "noble_slots": 3},
+        {"alliance_id": 2, "chief_slots": 5, "noble_slots": 2}]
+    kvk.add_event_alliance(c, eid, 1, 8, 4)  # same alliance -> updates both counts, no duplicate
     assert kvk.get_event_alliances(c, eid) == [
-        {"alliance_id": 1, "slots": 8}, {"alliance_id": 2, "slots": 5}]
+        {"alliance_id": 1, "chief_slots": 8, "noble_slots": 4},
+        {"alliance_id": 2, "chief_slots": 5, "noble_slots": 2}]
     kvk.remove_event_alliance(c, eid, 2)
-    assert kvk.get_event_alliances(c, eid) == [{"alliance_id": 1, "slots": 8}]
+    assert kvk.get_event_alliances(c, eid) == [{"alliance_id": 1, "chief_slots": 8, "noble_slots": 4}]
 
     kvk.delete_event(c, eid)  # cascade removes the alliance rows
     assert kvk.get_event_alliances(c, eid) == []

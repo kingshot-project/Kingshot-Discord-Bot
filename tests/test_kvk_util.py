@@ -3,7 +3,9 @@ from datetime import date
 import pytest
 
 from cogs.kvk_util import (
+    CHIEF_TRAINING_BONUS,
     SHARED_TRAINING_BONUS,
+    assign_two_tier,
     compute_training_points,
     format_speedups,
     generate_time_slots,
@@ -87,7 +89,45 @@ def test_compute_training_points_with_speed_count_capped():
 
 
 def test_shared_training_bonus_is_kingdom_kvk_position():
-    assert SHARED_TRAINING_BONUS == 105.0  # 30 kingdom + 25 KvK + 50 position
+    assert SHARED_TRAINING_BONUS == 105.0  # 30 kingdom + 25 KvK + 50 Noble Advisor
+    assert CHIEF_TRAINING_BONUS == 65.0    # 30 kingdom + 25 KvK + 10 Chief Minister
+
+
+def _tp(fid, noble, chief):
+    return {"fid": fid, "noble_points": noble, "chief_points": chief}
+
+
+def test_assign_two_tier_maximizes_total_not_naive():
+    # naive "top noble_points -> Noble" = 1 in Noble (100) + 2 in Chief (50) = 150.
+    # optimal = 2 in Noble (90) + 1 in Chief (99) = 189, because player 1 barely gains from Noble.
+    noble, chief = assign_two_tier([_tp(1, 100, 99), _tp(2, 90, 50)], 1, 1)
+    assert [p["fid"] for p in noble] == [2] and [p["fid"] for p in chief] == [1]
+
+
+def test_assign_two_tier_gives_noble_to_the_bigger_gain():
+    # player 1 gains 40 from Noble, player 2 only 4 -> player 1 takes the single Noble seat
+    noble, chief = assign_two_tier([_tp(1, 100, 60), _tp(2, 80, 76)], 1, 1)
+    assert [p["fid"] for p in noble] == [1] and [p["fid"] for p in chief] == [2]
+
+
+def test_assign_two_tier_only_chief_seats():
+    noble, chief = assign_two_tier([_tp(1, 100, 90), _tp(2, 80, 70), _tp(3, 60, 55)], 0, 2)
+    assert noble == [] and [p["fid"] for p in chief] == [1, 2]  # top two by chief points
+
+
+def test_assign_two_tier_oversubscribed_drops_weakest():
+    noble, chief = assign_two_tier([_tp(1, 100, 60), _tp(2, 90, 55), _tp(3, 10, 5)], 1, 1)
+    placed = {p["fid"] for p in noble} | {p["fid"] for p in chief}
+    assert placed == {1, 2}
+
+
+def test_assign_two_tier_all_noble_when_room():
+    noble, chief = assign_two_tier([_tp(1, 100, 60), _tp(2, 80, 50)], 5, 5)
+    assert {p["fid"] for p in noble} == {1, 2} and chief == []
+
+
+def test_assign_two_tier_no_seats():
+    assert assign_two_tier([_tp(1, 100, 60)], 0, 0) == ([], [])
 
 
 def test_compute_training_points_full_stack():

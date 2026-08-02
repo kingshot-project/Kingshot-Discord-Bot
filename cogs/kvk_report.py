@@ -131,7 +131,8 @@ _OVERRIDE_HELP = (
     f"{theme.checkIcon} **Unlock** - let Re-run place this player again\n"
     f"{theme.timeIcon} **Move** - set a new time for this player (type e.g. `15:00`)\n"
     f"{theme.trashIcon} **Remove** - take this player out of the plan\n"
-    f"{theme.refreshIcon} **Re-run** - plan everyone again from the signups"
+    f"{theme.refreshIcon} **Re-run** - plan everyone again from the signups\n"
+    f"{theme.announceIcon} **Publish** - post this schedule to the channel (editing stays open)"
 )
 
 
@@ -553,6 +554,45 @@ class KvkReport(commands.Cog):
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
 
+    async def _publish_snapshot(self, interaction: discord.Interaction, conn, event_id: int) -> None:
+        """Post the current schedule to the event's channel. This is a plain snapshot: it does NOT
+        change the event status or close editing, so an admin can keep tweaking and post again."""
+        ev = kvkdb.get_event(conn, event_id)
+        if ev is None or not ev["publish_channel_id"]:
+            await interaction.response.send_message(
+                "This event has no channel set, so there is nowhere to publish.", ephemeral=True)
+            return
+        if not kvkdb.get_slots(conn, event_id):
+            await interaction.response.send_message(
+                "Nothing to publish yet - run Report / Assign first.", ephemeral=True)
+            return
+        channel = self.bot.get_channel(int(ev["publish_channel_id"]))
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(int(ev["publish_channel_id"]))
+            except (discord.Forbidden, discord.NotFound):
+                await interaction.response.send_message("Publish channel not found.", ephemeral=True)
+                return
+        await interaction.response.defer(ephemeral=True)
+        embeds = self._render_embeds(conn, event_id)
+        try:
+            for i in range(0, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
+                await channel.send(embeds=embeds[i:i + _MAX_EMBEDS_PER_MESSAGE])
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "Could not post to that channel - check the bot's permissions there.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Posted the schedule to <#{ev['publish_channel_id']}>.", ephemeral=True)
+
+    async def launch_publish(self, interaction: discord.Interaction, event_id: int) -> None:
+        """Post the schedule snapshot. Shared by the /settings KvK menu and the override panel."""
+        sched = self.bot.get_cog("KvkScheduling")
+        if sched is None or not sched._is_global_admin(interaction):
+            await interaction.response.send_message("Global Admin only.", ephemeral=True)
+            return
+        await self._publish_snapshot(interaction, sched.conn, event_id)
+
     @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
     @app_commands.describe(event_id="The KvK event ID")
     async def kvk_report(self, interaction: discord.Interaction, event_id: int):
@@ -707,6 +747,9 @@ class _OverrideView(discord.ui.View):
             rerun_button = discord.ui.Button(label="Re-run", style=discord.ButtonStyle.primary, row=4)
             rerun_button.callback = self.rerun
             self.add_item(rerun_button)
+            publish_button = discord.ui.Button(label="Publish", style=discord.ButtonStyle.success, row=4)
+            publish_button.callback = self.publish
+            self.add_item(publish_button)
 
     @property
     def truncated(self) -> bool:
@@ -826,6 +869,9 @@ class _OverrideView(discord.ui.View):
     async def rerun(self, interaction: discord.Interaction):
         self.report_cog._compute(self.conn, self.event_id)
         await self._refresh(interaction)
+
+    async def publish(self, interaction: discord.Interaction):
+        await self.report_cog._publish_snapshot(interaction, self.conn, self.event_id)
 
 
 class _ConfirmReportView(discord.ui.View):

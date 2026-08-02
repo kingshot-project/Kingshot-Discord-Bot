@@ -1031,6 +1031,11 @@ class _KvkMenuView(discord.ui.View):
             report_button.callback = self.report
             self.add_item(report_button)
 
+            publish_button = discord.ui.Button(
+                label="Publish", emoji=theme.announceIcon, style=discord.ButtonStyle.success, row=1)
+            publish_button.callback = self.publish
+            self.add_item(publish_button)
+
             edit_button = discord.ui.Button(label="Edit a Signup", style=discord.ButtonStyle.secondary, row=1)
             edit_button.callback = self.edit_signup
             self.add_item(edit_button)
@@ -1073,6 +1078,7 @@ class _KvkMenuView(discord.ui.View):
         actions = "\n".join([
             f"{theme.addIcon} **Create Event** - start the setup wizard",
             f"{theme.chartIcon} **Report / Assign** - rank signups and place slots",
+            f"{theme.announceIcon} **Publish** - post the schedule to its channel (does not close editing)",
             f"{theme.editListIcon} **Edit a Signup** - fix one player's speedups",
             f"{theme.trashIcon} **Delete** - remove the event and its data",
         ])
@@ -1174,6 +1180,16 @@ class _KvkMenuView(discord.ui.View):
                 f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
             return
         await report_cog.launch_report(interaction, self.selected_event_id)
+
+    async def publish(self, interaction: discord.Interaction):
+        if not await self._require_event(interaction):
+            return
+        report_cog = self._report_cog()
+        if report_cog is None:
+            await interaction.response.send_message(
+                f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
+            return
+        await report_cog.launch_publish(interaction, self.selected_event_id)
 
     async def edit_signup(self, interaction: discord.Interaction):
         if not await self._require_event(interaction):

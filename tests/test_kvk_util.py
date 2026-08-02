@@ -130,6 +130,38 @@ def test_assign_two_tier_no_seats():
     assert assign_two_tier([_tp(1, 100, 60)], 0, 0) == ([], [])
 
 
+def _brute_two_tier(players, n, c):
+    """Exhaustive optimum: each player skips / takes a Noble / takes a Chief seat."""
+    import itertools
+    best = 0
+    for combo in itertools.product((0, 1, 2), repeat=len(players)):
+        if sum(x == 1 for x in combo) > n or sum(x == 2 for x in combo) > c:
+            continue
+        best = max(best, sum(
+            p["noble_points"] if a == 1 else p["chief_points"] if a == 2 else 0
+            for p, a in zip(players, combo, strict=True)))
+    return best
+
+
+def test_assign_two_tier_matches_bruteforce_and_is_valid():
+    import random
+    rng = random.Random(20260802)
+    for _ in range(400):
+        pnum = rng.randint(0, 6)
+        n, c = rng.randint(0, 3), rng.randint(0, 3)
+        players = []
+        for fid in range(pnum):
+            noble = rng.randint(0, 40)
+            players.append({"fid": fid, "noble_points": noble, "chief_points": rng.randint(0, noble)})
+        noble_list, chief_list = assign_two_tier(players, n, c)
+        # validity: within caps, no player placed twice
+        assert len(noble_list) <= n and len(chief_list) <= c
+        ids = [p["fid"] for p in noble_list] + [p["fid"] for p in chief_list]
+        assert len(ids) == len(set(ids)), (players, n, c, ids)
+        total = sum(p["noble_points"] for p in noble_list) + sum(p["chief_points"] for p in chief_list)
+        assert total == _brute_two_tier(players, n, c), (players, n, c, total)
+
+
 def test_compute_training_points_full_stack():
     # own 202.9% + shared 105% = 307.9% total: 80h stretches to 288000*4.079 = 1174752 s,
     # floor(1174752 / 21) = 55940 upgrades = 839100 pts.

@@ -23,16 +23,21 @@ _ROLE_ORDER = {"noble": 0, "chief": 1, "": 2}  # Noble seats listed first
 
 
 def _chief_points(s) -> int:
-    """A player's KvK points in a Chief seat (+10%) instead of the stored Noble value (+50%)."""
+    """A player's KvK points in a Chief seat (+10%) instead of the stored Noble value (+50%).
+
+    Falls back to 0 (never the Noble value) if the inputs are missing/unreadable: a pro Training
+    signup always has them, so a 0 here means malformed data, and inflating it to Noble would
+    silently distort the seat assignment.
+    """
     if not s.get("base_level"):
-        return s.get("kvk_points") or 0
+        return 0
     try:
         return compute_training_points(
             troop_tier(s["base_level"]), s["speedup_minutes"], s.get("upgrade_from"),
             s.get("upgrade_count") or 0, (s.get("training_speed") or 0) + CHIEF_TRAINING_BONUS,
         )["kvk_points"]
     except (ValueError, KeyError):
-        return s.get("kvk_points") or 0
+        return 0
 
 
 def _training_rows(members, chief_slots, noble_slots, slot_mode, pro):

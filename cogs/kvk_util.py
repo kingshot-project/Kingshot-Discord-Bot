@@ -266,9 +266,10 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
     """Rank signups by speedups, honor each player's desired slots, then fill the rest by rank.
 
     Each signup may carry "desired_slots" (a list of slot indices). In rank order a player is placed
-    in their first free desired slot; players with no free desired slot fill the remaining slots by
-    index order. Locked slots (locked={index: fid}) are pre-placed and never reassigned. With no
-    desired slots this reduces to the old behavior: rank order fills slots by index.
+    in their first free desired slot. A player whose desired slots are all taken falls back to the
+    free slot NEAREST their preference (so a lost 15:00 becomes 15:30, not 00:00); a player with no
+    preference takes the earliest free slot. Locked slots (locked={index: fid}) are pre-placed and
+    never reassigned.
     """
     locked = dict(locked or {})
     times = generate_time_slots(slot_mode)
@@ -278,7 +279,7 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
 
     assigned = dict(locked)              # slot_index -> fid
     taken_fids = set(locked.values())
-    leftover = []                        # ranked fids not placed by preference
+    leftover = []                        # ranked signups not placed by preference
     for s in ranked:
         fid = s["fid"]
         if fid in taken_fids:
@@ -291,14 +292,18 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
                 placed = True
                 break
         if not placed:
-            leftover.append(fid)
+            leftover.append(s)
 
-    free = (i for i in range(slot_count) if i not in assigned)
-    for fid in leftover:
-        i = next(free, None)
-        if i is None:
+    free = {i for i in range(slot_count) if i not in assigned}
+    for s in leftover:
+        if not free:
             break                        # more players than slots
-        assigned[i] = fid
+        wanted = [d for d in s.get("desired_slots", []) if 0 <= d < slot_count]
+        # Nearest free slot to a taken pick (ties -> earlier slot); with no usable pick the distance
+        # is 0 for every slot, so this falls through to the earliest free slot.
+        i = min(free, key=lambda x, w=wanted: (min((abs(x - d) for d in w), default=0), x))
+        assigned[i] = s["fid"]
+        free.discard(i)
 
     return [
         {"slot_index": i, "slot_time": times[i] if i < len(times) else "",

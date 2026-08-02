@@ -250,8 +250,20 @@ def test_rank_and_assign_honors_desired():
     ]
     by_slot = {r["slot_index"]: r["fid"] for r in rank_and_assign(signups, 4, 0)}
     assert by_slot[2] == 1                  # higher speedup wins the contested slot
-    assert by_slot[0] == 2                  # loser falls back to the first free slot
-    assert by_slot[1] is None and by_slot[3] is None
+    assert by_slot[1] == 2                  # loser lands on the nearest free slot (1 or 3 -> earlier 1)
+    assert by_slot[0] is None and by_slot[3] is None
+
+
+def test_rank_and_assign_loser_gets_nearest_free_to_preference():
+    # Both want slot 20; the higher speedup wins it and the loser lands NEXT TO 20, not at slot 0.
+    signups = [
+        {"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [20]},
+        {"fid": 2, "speedup_minutes": 50, "submitted_at": "t", "desired_slots": [20]},
+    ]
+    by_slot = {r["slot_index"]: r["fid"] for r in rank_and_assign(signups, 48, 0)}
+    assert by_slot[20] == 1
+    assert by_slot[19] == 2                 # nearest free to 20 (tie 19/21 -> earlier 19)
+    assert by_slot[0] is None              # not dumped at the start of the day
 
 
 def test_rank_and_assign_no_desired_is_sequential():

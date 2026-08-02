@@ -11,6 +11,7 @@ from discord.ext import commands
 from . import kvk_alliances
 from . import kvk_data as kvkdb
 from .kvk_util import (
+    CHIEF_TRAINING_BONUS,
     POSITION_TYPES,
     SHARED_TRAINING_BONUS,
     TROOP_LEVELS,
@@ -821,6 +822,11 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         except ValueError as exc:
             await interaction.response.send_message(f"{exc}. Fix and try again.", ephemeral=True)
             return
+        # At signup we do not know the seat yet (leaders decide later), so show both. total_speed is
+        # the Noble case (+50); the Chief case swaps that for +10.
+        chief_points = compute_training_points(
+            base_tier, hours_minutes, upgrade_from, upgrade_count,
+            personal_speed + CHIEF_TRAINING_BONUS)["kvk_points"]
 
         submitted_at = datetime.now(UTC).strftime(DT_FMT)
         kvkdb.upsert_signup(
@@ -834,7 +840,8 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         steps = [
             f"`1)` Speedups: **{format_speedups(hours_minutes)}** = {r['total_seconds']:,} s",
             f"`2)` Training speed: {personal_speed:g}% + {SHARED_TRAINING_BONUS:g}% "
-            f"(kingdom/KvK/Noble seat) = **{total_speed:g}%**",
+            f"(kingdom 30 + KvK 25 + **Noble** seat 50) = **{total_speed:g}%** "
+            f"- best case; a **Chief** seat adds +10, not +50",
             f"`3)` Effective time: {r['total_seconds']:,} x {r['speed_mult']:.3f} "
             f"= **{r['effective_seconds']:,} s** (training speed stretches your speedups)",
         ]
@@ -853,13 +860,16 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             description=(
                 f"{theme.crownIcon} KvK: **{ev['name'] if ev else self.event_id}**  -  fid `{self.fid}`\n"
                 f"{theme.upperDivider}\n"
-                f"{theme.targetIcon} These are **potential** points - an estimate. What you really score "
-                f"depends on holding the Training slot and the speedups you actually spend.\n"
+                f"{theme.targetIcon} These are **potential** points. Your seat - Noble (+50%) or Chief "
+                f"(+10%) - is decided later by the leaders, so both are shown below; the step-by-step math "
+                f"is the **Noble** best case. What you really score also depends on holding the slot and "
+                f"the speedups you spend.\n"
                 f"{theme.middleDivider}\n"
-                f"{theme.chartIcon} **How it is counted**\n" + "\n".join(steps)),
+                f"{theme.chartIcon} **How it is counted** (Noble seat)\n" + "\n".join(steps)),
             color=discord.Color.green())
         embed.add_field(
-            name=f"{theme.medalIcon} Potential KvK points", value=f"**{r['kvk_points']:,}**", inline=False)
+            name=f"{theme.medalIcon} Potential KvK points",
+            value=f"Noble seat **{r['kvk_points']:,}**   -   Chief seat **{chief_points:,}**", inline=False)
         if self.hub is not None:  # pro hub: show the receipt, then flip the Training button to done
             await interaction.response.send_message(embed=embed, ephemeral=True)
             await self.hub.mark_done("Training")

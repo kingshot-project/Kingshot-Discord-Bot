@@ -124,6 +124,16 @@ _MAX_EMBEDS_PER_MESSAGE = 10
 _MAX_GROUP_OPTIONS = 25
 _LOCK_MARK = "[LOCKED]"
 
+# Shown above the override panel so admins know what each button does.
+_OVERRIDE_HELP = (
+    "**Edit the plan** - pick a group, then a player, then a button:\n"
+    f"{theme.lockIcon} **Lock** - keep this player where they are on Re-run (same role and time)\n"
+    f"{theme.checkIcon} **Unlock** - let Re-run place this player again\n"
+    f"{theme.timeIcon} **Move** - set a new time for this player (type e.g. `15:00`)\n"
+    f"{theme.trashIcon} **Remove** - take this player out of the plan\n"
+    f"{theme.refreshIcon} **Re-run** - plan everyone again from the signups"
+)
+
 
 def _nicknames_for(fids: set) -> dict:
     """Batch-look-up nicknames for a set of fids. One query instead of one per fid."""
@@ -517,9 +527,10 @@ class KvkReport(commands.Cog):
         view = _OverrideView(self, sched.conn, event_id, ev["free_mode"])
         first = embeds[:_MAX_EMBEDS_PER_MESSAGE]
         if edit:
-            await interaction.response.edit_message(content=None, embeds=first, view=view)
+            await interaction.response.edit_message(content=_OVERRIDE_HELP, embeds=first, view=view)
         else:
-            await interaction.response.send_message(embeds=first, view=view, ephemeral=True)
+            await interaction.response.send_message(
+                content=_OVERRIDE_HELP, embeds=first, view=view, ephemeral=True)
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
         if view.truncated:
@@ -725,7 +736,8 @@ class _OverrideView(discord.ui.View):
     async def _refresh(self, interaction: discord.Interaction):
         self._build_items()
         embeds = self.report_cog._render_embeds(self.conn, self.event_id)
-        await interaction.response.edit_message(embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], view=self)
+        await interaction.response.edit_message(
+            content=_OVERRIDE_HELP, embeds=embeds[:_MAX_EMBEDS_PER_MESSAGE], view=self)
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
         if not self.groups:

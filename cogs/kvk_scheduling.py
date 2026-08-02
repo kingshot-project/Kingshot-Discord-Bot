@@ -2,7 +2,7 @@
 import contextlib
 import os
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import discord
 from discord import app_commands
@@ -16,6 +16,7 @@ from .kvk_util import (
     compute_training_points,
     format_speedups,
     generate_time_slots,
+    next_kvk_date,
     parse_desired_slots,
     parse_percent,
     parse_speedups,
@@ -83,7 +84,7 @@ class KvkScheduling(commands.Cog):
         if interaction.guild_id is None:
             await interaction.response.send_message("Use this command in a server, not a DM.", ephemeral=True)
             return
-        await interaction.response.send_modal(_KvkCreateModal(self))
+        await interaction.response.send_modal(_KvkCreateModal(self, interaction.guild_id))
 
     @app_commands.command(name="kvk_create", description="Start the KvK event setup wizard (Global Admin only).")
     async def kvk_create(self, interaction: discord.Interaction):
@@ -205,22 +206,36 @@ class _KvkDraft:
 class _KvkCreateModal(discord.ui.Modal, title="Create KvK Event"):
     """First step: name, dates, and the alliance-vs-kingdom scope switch."""
 
-    def __init__(self, cog: KvkScheduling):
+    def __init__(self, cog: KvkScheduling, guild_id: int):
         super().__init__()
         self.cog = cog
-        self.name_input = discord.ui.TextInput(label="Event name", max_length=100)
+        # Pre-fill the next KvK: start = next KvK Monday, signups run the weekend before (Fri 00:00 to
+        # the Monday 00:00, i.e. through Sunday). Slots/scope carry from the guild's last event. All editable.
+        start = next_kvk_date(datetime.now(UTC).date())
+        start_str = start.strftime(DATE_FMT)
+        open_str = (start - timedelta(days=3)).strftime(DATE_FMT) + " 00:00"
+        close_str = start_str + " 00:00"
+        events = kvkdb.list_events(cog.conn, guild_id)
+        last = kvkdb.get_event(cog.conn, events[0]["id"]) if events else None
+        slots_default = str(last["slots_per_alliance"]) if last and last["slots_per_alliance"] else None
+
+        self.name_input = discord.ui.TextInput(
+            label="Event name", max_length=100, default=f"KvK {start_str}")
         self.add_item(self.name_input)
         self.event_date_input = discord.ui.TextInput(
-            label="Event date (YYYY-MM-DD)", placeholder="2026-09-01", max_length=10)
+            label="Event date (YYYY-MM-DD)", placeholder="2026-09-01", max_length=10, default=start_str)
         self.add_item(self.event_date_input)
         self.signup_open_input = discord.ui.TextInput(
-            label="Signup opens (YYYY-MM-DD HH:MM UTC)", placeholder="2026-08-20 00:00", max_length=16)
+            label="Signup opens (YYYY-MM-DD HH:MM UTC)", placeholder="2026-08-20 00:00", max_length=16,
+            default=open_str)
         self.add_item(self.signup_open_input)
         self.signup_close_input = discord.ui.TextInput(
-            label="Signup closes (YYYY-MM-DD HH:MM UTC)", placeholder="2026-08-31 00:00", max_length=16)
+            label="Signup closes (YYYY-MM-DD HH:MM UTC)", placeholder="2026-08-31 00:00", max_length=16,
+            default=close_str)
         self.add_item(self.signup_close_input)
         self.slots_per_alliance_input = discord.ui.TextInput(
-            label="Slots per alliance (blank = kingdom scope)", required=False, max_length=5)
+            label="Slots per alliance (blank = kingdom scope)", required=False, max_length=5,
+            default=slots_default)
         self.add_item(self.slots_per_alliance_input)
 
     async def on_submit(self, interaction: discord.Interaction):

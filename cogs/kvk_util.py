@@ -1,7 +1,7 @@
 """Pure, dependency-free helpers for the KvK scheduler (no discord/sqlite imports)."""
 import math
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 POSITION_TYPES = ("Training", "Research", "Building")
 
@@ -18,6 +18,22 @@ def type_dates_for(event_date: str, active_types) -> list[tuple[str, str]]:
     base = datetime.strptime(event_date, "%Y-%m-%d")
     ordered = sorted(active_types, key=lambda t: _TYPE_DAY_OFFSET[t])
     return [(t, (base + timedelta(days=_TYPE_DAY_OFFSET[t])).strftime("%Y-%m-%d")) for t in ordered]
+
+
+# KvK recurs every 4 weeks starting on a Monday. A KvK week is one whose Monday, counted in whole
+# weeks since the first Monday of 1970, is 1 (mod 4) - the cycle that contains Monday 2026-08-10.
+_KVK_FIRST_MONDAY = date(1970, 1, 5)
+_KVK_WEEK_REMAINDER = 1
+_KVK_PERIOD_WEEKS = 4
+
+
+def next_kvk_date(today: date) -> date:
+    """The next KvK start date (a Monday), from `today`. During a KvK week its own Monday is returned
+    (even if already past); the roll to the next cycle happens once that week ends."""
+    monday = today - timedelta(days=today.weekday())
+    week = (monday - _KVK_FIRST_MONDAY).days // 7
+    kvk_week = week + ((_KVK_WEEK_REMAINDER - week) % _KVK_PERIOD_WEEKS)  # smallest >= week, == 1 (mod 4)
+    return _KVK_FIRST_MONDAY + timedelta(days=7 * kvk_week)
 
 _UNIT_MINUTES = {"d": 1440, "h": 60, "m": 1}
 _TOKEN_RE = re.compile(r"(\d+)\s*([dhm])")

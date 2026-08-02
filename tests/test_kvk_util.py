@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from cogs.kvk_util import (
@@ -5,6 +7,7 @@ from cogs.kvk_util import (
     compute_training_points,
     format_speedups,
     generate_time_slots,
+    next_kvk_date,
     parse_desired_slots,
     parse_percent,
     parse_speedups,
@@ -13,6 +16,24 @@ from cogs.kvk_util import (
     troop_tier,
     type_dates_for,
 )
+
+
+@pytest.mark.parametrize("today,expected", [
+    ("2026-08-02", "2026-08-10"),   # Sunday before -> the KvK Monday
+    ("2026-08-07", "2026-08-10"),   # Friday (signups open) -> same KvK
+    ("2026-08-10", "2026-08-10"),   # the Monday itself
+    ("2026-08-16", "2026-08-10"),   # still inside the KvK week (Mon 08-10 .. Sun 08-16)
+    ("2026-08-17", "2026-09-07"),   # next week -> next 4-week cycle
+    ("2026-09-07", "2026-09-07"),
+    ("2026-10-05", "2026-10-05"),
+    ("2025-01-01", "2024-12-30"),   # a Wednesday inside a KvK week -> that week's (past) Monday
+])
+def test_next_kvk_date(today, expected):
+    got = next_kvk_date(date.fromisoformat(today))
+    assert got.isoformat() == expected
+    assert got.weekday() == 0  # always a Monday
+    # the returned week is a KvK week: whole weeks since 1970's first Monday == 1 (mod 4)
+    assert ((got - date(1970, 1, 5)).days // 7) % 4 == 1
 
 
 def test_compute_training_points_example():

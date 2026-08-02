@@ -40,6 +40,15 @@ def _status_icon(status):
     return _STATUS_ICON.get(status)
 
 
+_POSITION_ICON = {
+    "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
+
+
+def _rich_position_lines(type_dates) -> str:
+    """'<icon> **Type** - date' lines for the event cards, in the given (day) order."""
+    return "\n".join(f"{_POSITION_ICON.get(t, '')} **{t}** - {date}" for t, date in type_dates)
+
+
 class KvkScheduling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -415,27 +424,23 @@ class _KvkWizardView(discord.ui.View):
 
         posted = await _post_announcement(interaction.client, d, event_id, type_dates)
 
-        pos_icon = {
-            "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
-        type_lines = "\n".join(f"{pos_icon.get(t, '')} {t}: {date}" for t, date in type_dates)
         scope_text = f"alliance ({d.slots_per_alliance} slots each)" if d.scope == "alliance" else "kingdom-wide"
-
+        mode_text = "Pro (troop levels + KvK points)" if d.pro_mode else "Standard"
+        description = (
+            f"**{d.name}**  (id `{event_id}`)\n"
+            f"{theme.upperDivider}\n"
+            f"{theme.calendarIcon} **Event date** - {d.event_date}\n"
+            f"{theme.globeIcon} **Scope** - {scope_text}\n"
+            f"{theme.timeIcon} **Slot mode** - {d.slot_mode} ({_SLOT_MODE_HINT[d.slot_mode]})\n"
+            f"{theme.boltIcon} **Mode** - {mode_text}\n"
+            f"{theme.alarmClockIcon} **Signup (UTC)** - {d.signup_open_at} to {d.signup_close_at}\n"
+            f"{theme.announceIcon} **Publish** - <#{d.publish_channel_id}>\n"
+            f"{theme.middleDivider}\n"
+            f"{theme.membersIcon} **Position days**\n{_rich_position_lines(type_dates)}"
+        )
         result_embed = discord.Embed(
             title=f"{theme.verifiedIcon} KvK event created",
-            description=f"**{d.name}**  (id `{event_id}`)",
-            color=discord.Color.green())
-        result_embed.add_field(name=f"{theme.calendarIcon} Event date", value=d.event_date, inline=True)
-        result_embed.add_field(name=f"{theme.globeIcon} Scope", value=scope_text, inline=True)
-        result_embed.add_field(name="Mode", value="Pro" if d.pro_mode else "Standard", inline=True)
-        result_embed.add_field(
-            name="Slot mode", value=f"{d.slot_mode} - {_SLOT_MODE_HINT[d.slot_mode]}", inline=True)
-        result_embed.add_field(name="Publish channel", value=f"<#{d.publish_channel_id}>", inline=True)
-        result_embed.add_field(
-            name="Signup window (UTC)", value=f"{d.signup_open_at} to {d.signup_close_at}", inline=False)
-        result_embed.add_field(name=f"{theme.membersIcon} Position dates", value=type_lines, inline=False)
-        if d.pro_mode:
-            result_embed.add_field(
-                name="Pro mode", value="Training day collects troop levels and scores KvK points.", inline=False)
+            description=description, color=discord.Color.green())
         if not posted:
             result_embed.add_field(
                 name="Announcement",
@@ -444,10 +449,35 @@ class _KvkWizardView(discord.ui.View):
         await interaction.response.edit_message(embed=result_embed, view=None)
 
 
+class _SignupButton(discord.ui.DynamicItem[discord.ui.Button], template=r"kvksignup:(?P<event_id>\d+)"):
+    """Persistent 'Sign up' button on the public announcement; the custom_id carries the event id."""
+
+    def __init__(self, event_id: int):
+        self.event_id = event_id
+        super().__init__(discord.ui.Button(
+            label="Sign up", style=discord.ButtonStyle.success, emoji=theme.verifiedIcon,
+            custom_id=f"kvksignup:{event_id}"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["event_id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("KvkScheduling")
+        if cog is None:
+            await interaction.response.send_message("KvK Scheduling is not available right now.", ephemeral=True)
+            return
+        fids = cog._fids_for_discord(interaction.user.id)
+        if not fids:
+            await interaction.response.send_message("No linked fid found. Run /register first.", ephemeral=True)
+            return
+        await cog._pick_fid_then_signup(interaction, self.event_id, fids)
+
+
 async def _post_announcement(
     client: discord.Client, draft: _KvkDraft, event_id: int, type_dates: list[tuple[str, str]]
 ) -> bool:
-    """Post the event announcement to the publish channel. Returns False on failure."""
+    """Post the event announcement (with a Sign up button) to the publish channel. False on failure."""
     channel = client.get_channel(draft.publish_channel_id)
     if channel is None:
         try:
@@ -455,28 +485,30 @@ async def _post_announcement(
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return False
 
-    pos_icon = {
-        "Training": theme.trainingIcon, "Research": theme.researchIcon, "Building": theme.constructionIcon}
-    type_lines = "\n".join(f"{pos_icon.get(t, '')} {t}: {date}" for t, date in type_dates)
     scope_text = (
         f"alliance ({draft.slots_per_alliance} slots each)" if draft.scope == "alliance" else "kingdom-wide")
-    embed = discord.Embed(
-        title=f"{theme.crossIcon} KvK: {draft.name}",
-        description="Run `/kvk_signup` to sign up.",
-        color=discord.Color.gold(),
+    mode_line = f"{theme.boltIcon} **Mode** - Pro (troop levels + KvK points)\n" if draft.pro_mode else ""
+    description = (
+        f"{theme.crownIcon} A new Kingdom-vs-Kingdom event has opened.\n"
+        f"{theme.upperDivider}\n"
+        f"{theme.calendarIcon} **Event date** - {draft.event_date}\n"
+        f"{theme.globeIcon} **Scope** - {scope_text}\n"
+        f"{theme.alarmClockIcon} **Signup (UTC)** - {draft.signup_open_at} to {draft.signup_close_at}\n"
+        f"{mode_line}"
+        f"{theme.middleDivider}\n"
+        f"{theme.membersIcon} **Position days**\n{_rich_position_lines(type_dates)}\n"
+        f"{theme.lowerDivider}\n"
+        f"{theme.nextIcon} Press **Sign up** below, or run `/kvk_signup` to join."
     )
-    embed.add_field(name=f"{theme.calendarIcon} Event date", value=draft.event_date, inline=True)
-    embed.add_field(name=f"{theme.globeIcon} Scope", value=scope_text, inline=True)
-    if draft.pro_mode:
-        embed.add_field(name="Mode", value="Pro (troop levels + KvK points)", inline=True)
-    embed.add_field(
-        name=f"{theme.alarmClockIcon} Signup window (UTC)",
-        value=f"{draft.signup_open_at} to {draft.signup_close_at}", inline=False)
-    embed.add_field(name=f"{theme.membersIcon} Position dates", value=type_lines, inline=False)
+    embed = discord.Embed(
+        title=f"{theme.crossIcon} KvK: {draft.name} {theme.crossIcon}",
+        description=description, color=discord.Color.gold())
     embed.set_footer(text=f"Event #{event_id}")
 
+    view = discord.ui.View(timeout=None)
+    view.add_item(_SignupButton(event_id))
     try:
-        await channel.send(embed=embed)
+        await channel.send(embed=embed, view=view)
     except (discord.Forbidden, discord.HTTPException):
         return False
     return True
@@ -1068,4 +1100,5 @@ class _ConfirmDeleteView(discord.ui.View):
 
 
 async def setup(bot):
+    bot.add_dynamic_items(_SignupButton)  # persistent Sign up buttons survive restarts
     await bot.add_cog(KvkScheduling(bot))

@@ -527,7 +527,10 @@ class KvkReport(commands.Cog):
 class _GroupSelect(discord.ui.Select):
     def __init__(self, override_view: "_OverrideView", groups: list):
         options = [
-            discord.SelectOption(label=_group_label(override_view.scope, ptype, aid), value=f"{ptype}|{aid}")
+            discord.SelectOption(
+                label=_group_label(override_view.scope, ptype, aid), value=f"{ptype}|{aid}",
+                default=(ptype == override_view.selected_type
+                         and aid == override_view.selected_alliance))  # stay shown after a refresh
             for ptype, aid in groups
         ]
         super().__init__(

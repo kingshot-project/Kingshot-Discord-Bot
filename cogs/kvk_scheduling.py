@@ -567,6 +567,8 @@ class _SignupTypeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.types_view.selected_types = list(self.values)
+        for opt in self.options:  # keep the picks shown after the view refreshes
+            opt.default = opt.value in self.values
         await interaction.response.edit_message(
             content=f"Picked: {', '.join(self.types_view.selected_types)}. "
                     f"Press Enter speedups to submit your times.",

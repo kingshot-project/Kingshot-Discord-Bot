@@ -1,4 +1,4 @@
-"""KvK report: rank submissions, auto-assign slots, admin override, publish."""
+"""KvK report: rank submissions, auto-assign slots, admin override."""
 import sqlite3
 
 import discord
@@ -80,10 +80,6 @@ _MAX_FIELDS_PER_EMBED = 25  # Discord's hard field-count cap per embed
 _MAX_EMBEDS_PER_MESSAGE = 10
 _MAX_GROUP_OPTIONS = 25
 _LOCK_MARK = "[LOCKED]"
-_LAYOUT_CHILD_CAP = 34   # keep each LayoutView under Discord's 40-children limit (container + its items)
-_TEXT_CHUNK = 3500       # max chars per TextDisplay; leaves room for the header under the message budget
-_MSG_CHAR_BUDGET = 3800  # Discord caps a Components-v2 message at 4000 display chars across all text
-_TYPE_COLOURS = [discord.Color.blurple(), discord.Color.green(), discord.Color.gold()]
 
 
 def _nicknames_for(fids: set) -> dict:
@@ -310,98 +306,6 @@ def _signups_embeds(conn, event_id) -> list:
     return embeds
 
 
-class _ScheduleLayout(discord.ui.LayoutView):
-    """A single Components-v2 message: one accent-coloured container of schedule text."""
-
-    def __init__(self, container: discord.ui.Container):
-        super().__init__(timeout=None)
-        self.add_item(container)
-
-
-def _emit_layouts(layouts: list, title: str, blocks: list, colour) -> None:
-    """Pack a title plus blocks into one or more _ScheduleLayout messages.
-
-    blocks are ("text", str) or ("sep", "") pairs. Each message stays under BOTH Discord's
-    40-children limit (via _LAYOUT_CHILD_CAP) and its 4000-char text budget (via _MSG_CHAR_BUDGET,
-    which discord.py does not enforce); overflow spills into a "(cont.)" message.
-    """
-    idx = 0
-    part = 0
-    while True:
-        header = title if part == 0 else f"{title} (cont.)"
-        children = [discord.ui.TextDisplay(header)]
-        used = len(header)
-        while idx < len(blocks) and len(children) < _LAYOUT_CHILD_CAP:
-            kind, text = blocks[idx]
-            if kind == "sep" and len(children) == 1:
-                idx += 1  # drop a divider that would lead a fresh message
-                continue
-            # Always place at least one real block (len(children) == 1), else respect the char budget.
-            if len(children) > 1 and used + len(text) > _MSG_CHAR_BUDGET:
-                break
-            children.append(discord.ui.Separator() if kind == "sep" else discord.ui.TextDisplay(text))
-            used += len(text)
-            idx += 1
-        layouts.append(_ScheduleLayout(discord.ui.Container(*children, accent_colour=colour)))
-        part += 1
-        if idx >= len(blocks):
-            break
-
-
-def _render_layouts(conn, event_id) -> list:
-    """Build the published schedule as Components-v2 LayoutViews (one or more messages).
-
-    One accent colour per position type; free mode is one text block, alliance mode is one block
-    per alliance separated by a divider. Skipped signups get a final orange note.
-    """
-    ev = kvkdb.get_event(conn, event_id)
-    if ev is None:
-        container = discord.ui.Container(
-            discord.ui.TextDisplay(f"No event with id {event_id}."), accent_colour=discord.Color.red())
-        return [_ScheduleLayout(container)]
-
-    metric_map = _metric_map(conn, event_id, ev)
-    seat_points = _seat_points(conn, event_id, ev)
-    slots = kvkdb.get_slots(conn, event_id)
-    nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
-    names = _alliance_names()
-    by_type: dict = {}
-    for row in slots:
-        by_type.setdefault(row["position_type"], []).append(row)
-
-    layouts: list = []
-    for i, position_type in enumerate(kvkdb.get_active_types(conn, event_id)):
-        colour = _TYPE_COLOURS[i % len(_TYPE_COLOURS)]
-        rows = by_type.get(position_type, [])
-        blocks: list = []
-        if ev["free_mode"]:
-            lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in rows]
-            blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
-        else:
-            by_group: dict = {}  # (alliance_id, role) -> rows; role splits Training into Noble/Chief
-            for r in rows:
-                by_group.setdefault((r["alliance_id"], r.get("role", "")), []).append(r)
-            ordered = sorted(by_group, key=lambda k: (k[0], _ROLE_ORDER.get(k[1], 9)))
-            for pos, (aid, role) in enumerate(ordered):
-                if pos:  # a divider before every section after the first
-                    blocks.append(("sep", ""))
-                heading = _alliance_label(aid, names)
-                if role:
-                    heading += f" - {_ROLE_LABEL.get(role, role)}"
-                lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points)
-                         for r in by_group[(aid, role)]]
-                chunks = _chunk_lines(lines, _TEXT_CHUNK)
-                blocks.append(("text", f"**{heading}**\n{chunks[0]}"))
-                blocks.extend(("text", chunk) for chunk in chunks[1:])
-        _emit_layouts(layouts, f"## {ev['name']} - {position_type}", blocks, colour)
-
-    skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
-    if skipped:
-        blocks = [("text", chunk) for chunk in _chunk_lines([str(f) for f in skipped], _TEXT_CHUNK)]
-        _emit_layouts(layouts, "## Report notes - Skipped (no alliance)", blocks, discord.Color.orange())
-    return layouts
-
-
 class KvkReport(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -509,56 +413,6 @@ class KvkReport(commands.Cog):
             embeds.extend(notes_embeds)
         return embeds
 
-    async def _confirm_publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
-        """Ask the admin to confirm before posting to the public channel, so a stray click cannot.
-
-        Shared by /kvk_publish, the /settings menu, and the _OverrideView Publish button.
-        """
-        ev = kvkdb.get_event(conn, event_id)
-        if not ev or ev["status"] not in ("assigned", "published"):
-            await interaction.response.send_message(
-                "Run /kvk_report (or the Report / Assign button) first.", ephemeral=True)
-            return
-        if not ev["publish_channel_id"]:
-            await interaction.response.send_message("No publish channel set.", ephemeral=True)
-            return
-        again = " again" if ev["status"] == "published" else ""
-        message = (
-            f"Publish '{ev['name']}' to <#{ev['publish_channel_id']}>{again}?\n\n"
-            f"What this does:\n"
-            f"- posts the full schedule to that channel (everyone there can see it)\n"
-            f"- marks the event as \"published\"\n\n"
-            f"Signups for this event are already closed at this stage - they close when you run "
-            f"Report / Assign, not here - and publishing does not reopen them."
-        )
-        await interaction.response.send_message(
-            message, view=_ConfirmPublishView(self, conn, event_id), ephemeral=True)
-
-    async def _do_publish(self, interaction: discord.Interaction, conn, event_id: int) -> None:
-        """Post the report to the publish channel and mark it published.
-
-        Called from the confirm view after it has edited (acked) the interaction, so it uses followups.
-        """
-        ev = kvkdb.get_event(conn, event_id)
-        if not ev or ev["status"] not in ("assigned", "published"):
-            await interaction.followup.send(
-                "Run /kvk_report (or the Report / Assign button) first.", ephemeral=True)
-            return
-        if not ev["publish_channel_id"]:
-            await interaction.followup.send("No publish channel set.", ephemeral=True)
-            return
-        channel = self.bot.get_channel(int(ev["publish_channel_id"]))
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(int(ev["publish_channel_id"]))
-            except (discord.Forbidden, discord.NotFound):
-                await interaction.followup.send("Publish channel not found.", ephemeral=True)
-                return
-        for layout in _render_layouts(conn, event_id):
-            await channel.send(view=layout)
-        kvkdb.set_status(conn, event_id, "published")
-        await interaction.followup.send("Published.", ephemeral=True)
-
     async def launch_report(self, interaction: discord.Interaction, event_id: int) -> None:
         """Confirm the consequences, then rank + assign. Shared by /kvk_report and the KvK menu."""
         sched = self.bot.get_cog("KvkScheduling")
@@ -579,7 +433,7 @@ class KvkReport(commands.Cog):
             f"What this does:\n"
             f"- ranks every signup (by speedups, or KvK points in Pro mode) and fills the slots\n"
             f"{gate_line}"
-            f"- opens the override panel (swap / lock / clear / publish)\n\n"
+            f"- opens the override panel (swap / lock / clear)\n\n"
             f"You can re-run it from that panel; signups do not reopen."
         )
         await interaction.response.send_message(
@@ -621,23 +475,10 @@ class KvkReport(commands.Cog):
         for extra in range(_MAX_EMBEDS_PER_MESSAGE, len(embeds), _MAX_EMBEDS_PER_MESSAGE):
             await interaction.followup.send(embeds=embeds[extra:extra + _MAX_EMBEDS_PER_MESSAGE], ephemeral=True)
 
-    async def launch_publish(self, interaction: discord.Interaction, event_id: int) -> None:
-        """Publish the schedule. Shared by /kvk_publish and the /settings KvK menu."""
-        sched = self.bot.get_cog("KvkScheduling")
-        if sched is None or not sched._is_global_admin(interaction):
-            await interaction.response.send_message("Global Admin only.", ephemeral=True)
-            return
-        await self._confirm_publish(interaction, sched.conn, event_id)
-
     @app_commands.command(name="kvk_report", description="Rank, assign, and preview KvK slots (Global Admin only).")
     @app_commands.describe(event_id="The KvK event ID")
     async def kvk_report(self, interaction: discord.Interaction, event_id: int):
         await self.launch_report(interaction, event_id)
-
-    @app_commands.command(name="kvk_publish", description="Publish the KvK schedule (Global Admin only).")
-    @app_commands.describe(event_id="The KvK event ID")
-    async def kvk_publish(self, interaction: discord.Interaction, event_id: int):
-        await self.launch_publish(interaction, event_id)
 
 
 class _GroupSelect(discord.ui.Select):
@@ -702,7 +543,7 @@ class _SwapModal(discord.ui.Modal, title="Swap Slots"):
 
 
 class _OverrideView(discord.ui.View):
-    """Admin controls to tweak an auto-assigned KvK report before publishing (Task 7)."""
+    """Admin controls to tweak an auto-assigned KvK report (swap / lock / unlock / clear)."""
 
     def __init__(self, report_cog: KvkReport, conn, event_id: int, free_mode: int):
         super().__init__(timeout=VIEW_TIMEOUT)
@@ -752,10 +593,6 @@ class _OverrideView(discord.ui.View):
         rerun_button = discord.ui.Button(label="Re-run", style=discord.ButtonStyle.primary, row=2)
         rerun_button.callback = self.rerun
         self.add_item(rerun_button)
-
-        publish_button = discord.ui.Button(label="Publish", style=discord.ButtonStyle.success, row=2)
-        publish_button.callback = self.publish
-        self.add_item(publish_button)
 
     @property
     def truncated(self) -> bool:
@@ -843,8 +680,6 @@ class _OverrideView(discord.ui.View):
         self.report_cog._compute(self.conn, self.event_id)
         await self._refresh(interaction)
 
-    async def publish(self, interaction: discord.Interaction):
-        await self.report_cog._confirm_publish(interaction, self.conn, self.event_id)
 
 
 class _ConfirmReportView(discord.ui.View):
@@ -881,30 +716,6 @@ class _ConfirmReportView(discord.ui.View):
 
     async def cancel(self, interaction: discord.Interaction):
         await interaction.response.edit_message(content="Report cancelled.", view=None)
-
-
-class _ConfirmPublishView(discord.ui.View):
-    """A Yes/Cancel gate shown before the public publish, so a stray click cannot post the schedule."""
-
-    def __init__(self, report_cog: KvkReport, conn, event_id: int):
-        super().__init__(timeout=VIEW_TIMEOUT)
-        self.report_cog = report_cog
-        self.conn = conn
-        self.event_id = event_id
-        yes_button = discord.ui.Button(label="Yes, publish", style=discord.ButtonStyle.success)
-        yes_button.callback = self.confirm
-        self.add_item(yes_button)
-        cancel_button = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
-        cancel_button.callback = self.cancel
-        self.add_item(cancel_button)
-
-    async def confirm(self, interaction: discord.Interaction):
-        # Edit first: this acks the click and drops the buttons so a second click cannot re-post.
-        await interaction.response.edit_message(content="Publishing...", view=None)
-        await self.report_cog._do_publish(interaction, self.conn, self.event_id)
-
-    async def cancel(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(content="Publish cancelled.", view=None)
 
 
 async def setup(bot):

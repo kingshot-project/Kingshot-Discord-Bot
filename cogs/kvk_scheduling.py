@@ -976,7 +976,7 @@ class _EditSignupModal(discord.ui.Modal, title="Edit a KvK Signup"):
 
 
 class _KvkMenuView(discord.ui.View):
-    """The /settings KvK sub-menu: pick an event, then create, report, publish, or edit signups."""
+    """The /settings KvK sub-menu: pick an event, then create, report, edit, or delete."""
 
     def __init__(self, cog: KvkScheduling, guild_id: int, viewer_id: int):
         super().__init__(timeout=VIEW_TIMEOUT)
@@ -1009,9 +1009,9 @@ class _KvkMenuView(discord.ui.View):
         return True
 
     def _build_items(self) -> None:
-        """(Re)build the components from the current event set. The event select and the actions
-        that need a selected event only appear when at least one event exists (Discord needs 1-25
-        select options)."""
+        """(Re)build the components. The event picker and Create Event show whenever events exist;
+        every per-event action (Report / Assign, Edit, Delete, View, alliance controls) appears only
+        after an event is picked."""
         self.clear_items()
         self.events = kvkdb.list_events(self.cog.conn, self.guild_id)
         if self.selected_event_id not in {e["id"] for e in self.events}:
@@ -1025,14 +1025,11 @@ class _KvkMenuView(discord.ui.View):
         create_button.callback = self.create
         self.add_item(create_button)
 
-        if self.events:
+        selected = kvkdb.get_event(self.cog.conn, self.selected_event_id) if self.selected_event_id else None
+        if selected is not None:
             report_button = discord.ui.Button(label="Report / Assign", style=discord.ButtonStyle.primary, row=1)
             report_button.callback = self.report
             self.add_item(report_button)
-
-            publish_button = discord.ui.Button(label="Publish", style=discord.ButtonStyle.secondary, row=1)
-            publish_button.callback = self.publish
-            self.add_item(publish_button)
 
             edit_button = discord.ui.Button(label="Edit a Signup", style=discord.ButtonStyle.secondary, row=1)
             edit_button.callback = self.edit_signup
@@ -1048,8 +1045,6 @@ class _KvkMenuView(discord.ui.View):
             view_button.callback = self.view
             self.add_item(view_button)
 
-        selected = kvkdb.get_event(self.cog.conn, self.selected_event_id) if self.selected_event_id else None
-        if selected is not None:
             toggle = discord.ui.Button(
                 label="Switch to alliances" if selected["free_mode"] else "Switch to free reg",
                 emoji=theme.globeIcon, style=discord.ButtonStyle.secondary, row=2)
@@ -1078,7 +1073,6 @@ class _KvkMenuView(discord.ui.View):
         actions = "\n".join([
             f"{theme.addIcon} **Create Event** - start the setup wizard",
             f"{theme.chartIcon} **Report / Assign** - rank signups and place slots",
-            f"{theme.announceIcon} **Publish** - post the schedule to its channel",
             f"{theme.editListIcon} **Edit a Signup** - fix one player's speedups",
             f"{theme.trashIcon} **Delete** - remove the event and its data",
         ])
@@ -1180,16 +1174,6 @@ class _KvkMenuView(discord.ui.View):
                 f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
             return
         await report_cog.launch_report(interaction, self.selected_event_id)
-
-    async def publish(self, interaction: discord.Interaction):
-        if not await self._require_event(interaction):
-            return
-        report_cog = self._report_cog()
-        if report_cog is None:
-            await interaction.response.send_message(
-                f"{theme.deniedIcon} KvK Report module not found.", ephemeral=True)
-            return
-        await report_cog.launch_publish(interaction, self.selected_event_id)
 
     async def edit_signup(self, interaction: discord.Interaction):
         if not await self._require_event(interaction):

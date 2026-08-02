@@ -14,6 +14,7 @@ from .kvk_util import (
     compute_training_points,
     format_speedups,
     generate_time_slots,
+    parse_desired_slots,
     place_on_grid,
     rank_and_assign,
     troop_tier,
@@ -42,26 +43,67 @@ def _chief_points(s) -> int:
         return 0
 
 
-def _training_rows(members, chief_slots, noble_slots, slot_mode, pro):
+def _locks_by_grid(conn, event_id, position_type, alliance_id, slot_mode, role=None):
+    """Locked slots of a group as {grid_index: fid}, read from the locked rows' slot_time.
+
+    In alliance mode slot_index is opaque and slot_time is the real time, so a lock must re-pin by
+    TIME on Re-run (a moved-then-locked player keeps their new time). Filter by role to split a
+    Training group's Noble and Chief locks."""
+    grid_pos = {t: i for i, t in enumerate(generate_time_slots(slot_mode))}
+    out = {}
+    for r in kvkdb.get_slots(conn, event_id):
+        if (r["position_type"] == position_type and r["alliance_id"] == alliance_id
+                and r["locked"] and r["fid"] is not None
+                and (role is None or r.get("role", "") == role)):
+            gi = grid_pos.get(r["slot_time"])
+            if gi is not None:
+                out[gi] = r["fid"]
+    return out
+
+
+def _training_rows(members, chief_slots, noble_slots, slot_mode, pro, locked_noble=None, locked_chief=None):
     """Noble + Chief seat rows for a Training group, each player placed at their preferred day time.
     Pro events pick Noble/Chief membership to maximise total KvK points (Noble +50%, Chief +10%);
     standard events split by speedups. Returns only the occupied rows; each carries its role and, for
-    pro events, its per-seat points."""
+    pro events, its per-seat points.
+
+    locked_noble / locked_chief are {grid_index: fid}. A locked player keeps their role and time: they
+    are pre-placed and consume a seat of that role, and the two-tier / speedup split fills the rest."""
+    locked_noble = dict(locked_noble or {})
+    locked_chief = dict(locked_chief or {})
     if pro:
-        players = [{**s, "noble_points": s.get("kvk_points") or 0, "chief_points": _chief_points(s)}
-                   for s in members]
-        noble, chief = assign_two_tier(players, noble_slots, chief_slots)
+        enriched = {s["fid"]: {**s, "noble_points": s.get("kvk_points") or 0, "chief_points": _chief_points(s)}
+                    for s in members}
     else:
-        ranked = sorted(members, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
-        noble, chief = ranked[:noble_slots], ranked[noble_slots:noble_slots + chief_slots]
+        enriched = {s["fid"]: s for s in members}
+
+    lock_noble_fids = [f for f in locked_noble.values() if f in enriched]
+    lock_chief_fids = [f for f in locked_chief.values() if f in enriched]
+    locked_all = set(lock_noble_fids) | set(lock_chief_fids)
+    free = [enriched[s["fid"]] for s in members if s["fid"] not in locked_all]
+    noble_room = max(0, noble_slots - len(lock_noble_fids))
+    chief_room = max(0, chief_slots - len(lock_chief_fids))
+    if pro:
+        noble_free, chief_free = assign_two_tier(free, noble_room, chief_room)
+    else:
+        ranked = sorted(free, key=lambda s: (-s["speedup_minutes"], s["submitted_at"], s["fid"]))
+        noble_free, chief_free = ranked[:noble_room], ranked[noble_room:noble_room + chief_room]
+
+    noble_group = [enriched[f] for f in lock_noble_fids] + noble_free
+    chief_group = [enriched[f] for f in lock_chief_fids] + chief_free
 
     rows = []
-    for role, group, pts_key in (("noble", noble, "noble_points"), ("chief", chief, "chief_points")):
+    for role, group, pts_key, locked in (
+        ("noble", noble_group, "noble_points", locked_noble),
+        ("chief", chief_group, "chief_points", locked_chief),
+    ):
         # Rank the within-role placement by seat points (Pro) so a higher-value player gets first pick
         # of a contested preferred time; standard events fall back to speedups inside place_on_grid.
         scored = [{**p, "score": p[pts_key]} for p in group] if pro else group
         points_by_fid = {p["fid"]: p.get(pts_key) for p in group} if pro else {}
-        for r in place_on_grid(scored, slot_mode):
+        group_fids = {p["fid"] for p in group}
+        role_lock = {g: f for g, f in locked.items() if f in group_fids}
+        for r in place_on_grid(scored, slot_mode, locked=role_lock):
             rows.append({**r, "role": role, "points": points_by_fid.get(r["fid"])})
     # Noble and Chief are placed on the same day grid, so their real-time slot indices can collide.
     # The kvk_slots key is (event, position_type, alliance_id, slot_index) with no role, so give the
@@ -225,6 +267,8 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
     Alliance groups list only the occupied seats at each player's real preferred time and end with a
     "(K seats open)" line; the header shows "(N seats, M filled)". Free mode shows the full grid."""
     groups: list = []
+    # slot_index is opaque in alliance mode, so order rows by their real time (from slot_time).
+    grid_pos = {t: i for i, t in enumerate(generate_time_slots(ev["slot_mode"]))}
     if ev["free_mode"]:
         lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in rows]
         groups.append(("Kingdom", lines))
@@ -240,7 +284,8 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
             # count against chief_slots.
             seats = alliance_seats.get(aid, {}).get("noble" if role == "noble" else "chief", 0)
             occupied = sorted(
-                (r for r in by_group[(aid, role)] if r["fid"] is not None), key=lambda r: r["slot_index"])
+                (r for r in by_group[(aid, role)] if r["fid"] is not None),
+                key=lambda r: grid_pos.get(r["slot_time"], 0))
             if seats:
                 label += f" ({seats} seats, {len(occupied)} filled)"
             lines = [_slot_line(r, position_type, metric_map, nicknames, seat_points) for r in occupied]
@@ -359,13 +404,16 @@ class KvkReport(commands.Cog):
                 for a in kvkdb.get_event_alliances(conn, event_id):
                     aid_int = a["alliance_id"]
                     members = by_alliance.get(aid_int, [])
+                    # Locks re-pin by TIME (grid index from slot_time), since slot_index is opaque here.
                     if position_type == "Training":
                         # Training day = Noble Advisor + Chief Minister seats.
+                        lock_n = _locks_by_grid(conn, event_id, position_type, aid_int, slot_mode, "noble")
+                        lock_c = _locks_by_grid(conn, event_id, position_type, aid_int, slot_mode, "chief")
                         groups[(position_type, aid_int)] = _training_rows(
-                            members, a["chief_slots"], a["noble_slots"], slot_mode, pro_training)
+                            members, a["chief_slots"], a["noble_slots"], slot_mode, pro_training, lock_n, lock_c)
                     else:
                         # Building/Research = Chief Minister seats only; place at preferred times.
-                        locks = kvkdb.get_locks(conn, event_id, position_type, aid_int)
+                        locks = _locks_by_grid(conn, event_id, position_type, aid_int, slot_mode)
                         groups[(position_type, aid_int)] = assign_alliance_slots(
                             members, a["chief_slots"], slot_mode, locked=locks)
         return groups
@@ -452,7 +500,7 @@ class KvkReport(commands.Cog):
             f"What this does:\n"
             f"- ranks every signup (by speedups, or KvK points in Pro mode) and fills the slots\n"
             f"{gate_line}"
-            f"- opens the override panel (swap / lock / clear)\n\n"
+            f"- opens the override panel (pick a player, then lock / unlock / move / remove)\n\n"
             f"You can re-run it from that panel; signups do not reopen."
         )
         await interaction.response.send_message(
@@ -519,50 +567,51 @@ class _GroupSelect(discord.ui.Select):
         position_type, aid = self.values[0].split("|")
         self.override_view.selected_type = position_type
         self.override_view.selected_alliance = int(aid)
-        await interaction.response.send_message(
-            f"Selected: {position_type}, alliance {aid}. Use Swap/Lock/Unlock/Clear next.", ephemeral=True)
+        self.override_view.selected_index = None
+        self.override_view.player_page = 0
+        await self.override_view._refresh(interaction)
 
 
-class _SlotIndexModal(discord.ui.Modal):
-    """One slot-index input, used by Lock, Unlock, and Clear."""
+class _PlayerSelect(discord.ui.Select):
+    """Pick a player in the chosen group (paginated, 25 per page). Lock/Unlock/Move/Remove act on it."""
 
-    def __init__(self, parent_view: "_OverrideView", title: str, on_confirm):
-        super().__init__(title=title)
-        self.parent_view = parent_view
-        self.on_confirm = on_confirm
-        self.slot_index = discord.ui.TextInput(label="Slot index", max_length=3)
-        self.add_item(self.slot_index)
+    def __init__(self, override_view: "_OverrideView", page_rows: list, page: int, total_pages: int):
+        options = []
+        for r in page_rows:
+            role = r.get("role", "")
+            role_txt = f", {_ROLE_LABEL[role]}" if role in _ROLE_LABEL else ""
+            lock_txt = " [LOCKED]" if r["locked"] else ""
+            nick = override_view.nicknames.get(r["fid"], f"Unknown ({r['fid']})")
+            options.append(discord.SelectOption(
+                label=f"{r['slot_time']} - {nick} ({r['fid']}){role_txt}{lock_txt}"[:100],
+                value=str(r["slot_index"]),
+                default=(r["slot_index"] == override_view.selected_index)))
+        super().__init__(
+            placeholder=f"Pick a player (page {page + 1}/{total_pages})", options=options,
+            min_values=1, max_values=1, row=1)
+        self.override_view = override_view
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            index = int(self.slot_index.value.strip())
-        except ValueError:
-            await interaction.response.send_message("Slot index must be a whole number.", ephemeral=True)
-            return
-        await self.on_confirm(interaction, index)
+    async def callback(self, interaction: discord.Interaction):
+        self.override_view.selected_index = int(self.values[0])
+        await self.override_view._refresh(interaction)
 
 
-class _SwapModal(discord.ui.Modal, title="Swap Slots"):
+class _MoveTimeModal(discord.ui.Modal, title="Move to time"):
     def __init__(self, parent_view: "_OverrideView"):
         super().__init__()
         self.parent_view = parent_view
-        self.index_a = discord.ui.TextInput(label="First slot index", max_length=3)
-        self.add_item(self.index_a)
-        self.index_b = discord.ui.TextInput(label="Second slot index", max_length=3)
-        self.add_item(self.index_b)
+        self.time_input = discord.ui.TextInput(label="Time (e.g. 15:00)", max_length=11)
+        self.add_item(self.time_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        try:
-            a = int(self.index_a.value.strip())
-            b = int(self.index_b.value.strip())
-        except ValueError:
-            await interaction.response.send_message("Slot indices must be whole numbers.", ephemeral=True)
-            return
-        await self.parent_view.swap_slots(interaction, a, b)
+        await self.parent_view.do_move(interaction, self.time_input.value)
 
 
 class _OverrideView(discord.ui.View):
-    """Admin controls to tweak an auto-assigned KvK report (swap / lock / unlock / clear)."""
+    """Admin controls to tweak an auto-assigned KvK report: pick a group, pick a player, then
+    Lock / Unlock / Move / Remove - no slot-index typing, the player select carries the times."""
+
+    PLAYER_PAGE_SIZE = 25
 
     def __init__(self, report_cog: KvkReport, conn, event_id: int, free_mode: int):
         super().__init__(timeout=VIEW_TIMEOUT)
@@ -573,51 +622,86 @@ class _OverrideView(discord.ui.View):
         self.names = _alliance_names()
         self.selected_type: str | None = None
         self.selected_alliance: int | None = None
+        self.selected_index: int | None = None
+        self.player_page = 0
+        self.nicknames: dict = {}
         self.groups: list = []
         self._build_items()
 
-    def _build_items(self) -> None:
-        """(Re)build the view's components from the current group set.
+    def _slot_mode(self) -> int:
+        ev = kvkdb.get_event(self.conn, self.event_id)
+        return ev["slot_mode"] if ev else 0
 
-        A Discord select must have 1-25 options, so the group select (and the buttons that
-        depend on a selected group) are only added when at least one group exists. Called from
-        __init__ and again from _refresh so the controls stay in sync after Re-run changes which
-        groups exist (e.g. the first signup for a previously-empty alliance).
-        """
+    def _group_rows(self) -> list:
+        """Occupied rows of the selected group, ordered by real time (slot_time)."""
+        if self.selected_type is None:
+            return []
+        grid_pos = {t: i for i, t in enumerate(generate_time_slots(self._slot_mode()))}
+        rows = [r for r in kvkdb.get_slots(self.conn, self.event_id)
+                if r["position_type"] == self.selected_type
+                and r["alliance_id"] == self.selected_alliance and r["fid"] is not None]
+        rows.sort(key=lambda r: grid_pos.get(r["slot_time"], 0))
+        return rows
+
+    def _build_items(self) -> None:
+        """(Re)build the components. The group select is always shown; the player select and the
+        per-player actions appear once a group is picked. A Discord select caps at 25 options, so
+        the player list paginates with Previous / Next."""
         self.clear_items()
         self.groups = _distinct_groups(self.conn, self.event_id)
         if (self.selected_type, self.selected_alliance) not in self.groups:
             self.selected_type = None
             self.selected_alliance = None
+            self.selected_index = None
+            self.player_page = 0
 
         if self.groups:
             self.add_item(_GroupSelect(self, self.groups[:_MAX_GROUP_OPTIONS]))
 
-            swap_button = discord.ui.Button(label="Swap", style=discord.ButtonStyle.secondary, row=1)
-            swap_button.callback = self.swap_prompt
-            self.add_item(swap_button)
+        if self.selected_type is not None:
+            rows = self._group_rows()
+            self.nicknames = _nicknames_for({r["fid"] for r in rows})
+            if self.selected_index not in {r["slot_index"] for r in rows}:
+                self.selected_index = None
+            total_pages = max(1, (len(rows) + self.PLAYER_PAGE_SIZE - 1) // self.PLAYER_PAGE_SIZE)
+            self.player_page = min(self.player_page, total_pages - 1)
+            start = self.player_page * self.PLAYER_PAGE_SIZE
+            page_rows = rows[start:start + self.PLAYER_PAGE_SIZE]
+            if page_rows:
+                self.add_item(_PlayerSelect(self, page_rows, self.player_page, total_pages))
 
-            lock_button = discord.ui.Button(label="Lock", style=discord.ButtonStyle.secondary, row=1)
-            lock_button.callback = self.lock_prompt
-            self.add_item(lock_button)
+            for label, cb, style in (
+                ("Lock", self.lock, discord.ButtonStyle.secondary),
+                ("Unlock", self.unlock, discord.ButtonStyle.secondary),
+                ("Move...", self.move_prompt, discord.ButtonStyle.secondary),
+                ("Remove", self.remove, discord.ButtonStyle.danger),
+            ):
+                button = discord.ui.Button(label=label, style=style, row=2)
+                button.callback = cb
+                self.add_item(button)
 
-            unlock_button = discord.ui.Button(label="Unlock", style=discord.ButtonStyle.secondary, row=1)
-            unlock_button.callback = self.unlock_prompt
-            self.add_item(unlock_button)
+            if total_pages > 1:
+                prev_button = discord.ui.Button(
+                    label="Previous", emoji=theme.prevIcon, style=discord.ButtonStyle.secondary,
+                    row=3, disabled=self.player_page == 0)
+                prev_button.callback = self.prev_page
+                self.add_item(prev_button)
+                next_button = discord.ui.Button(
+                    label="Next", emoji=theme.nextIcon, style=discord.ButtonStyle.secondary,
+                    row=3, disabled=self.player_page >= total_pages - 1)
+                next_button.callback = self.next_page
+                self.add_item(next_button)
 
-            clear_button = discord.ui.Button(label="Clear", style=discord.ButtonStyle.danger, row=2)
-            clear_button.callback = self.clear_prompt
-            self.add_item(clear_button)
-
-        rerun_button = discord.ui.Button(label="Re-run", style=discord.ButtonStyle.primary, row=2)
-        rerun_button.callback = self.rerun
-        self.add_item(rerun_button)
+        if self.groups:
+            rerun_button = discord.ui.Button(label="Re-run", style=discord.ButtonStyle.primary, row=4)
+            rerun_button.callback = self.rerun
+            self.add_item(rerun_button)
 
     @property
     def truncated(self) -> bool:
         return len(self.groups) > _MAX_GROUP_OPTIONS
 
-    def _find_row(self, index: int):
+    def _find_row(self, index):
         for row in kvkdb.get_slots(self.conn, self.event_id):
             if (row["position_type"] == self.selected_type
                     and row["alliance_id"] == self.selected_alliance
@@ -625,11 +709,18 @@ class _OverrideView(discord.ui.View):
                 return row
         return None
 
-    async def _require_group(self, interaction: discord.Interaction) -> bool:
+    async def _selected_row(self, interaction: discord.Interaction):
         if self.selected_type is None:
             await interaction.response.send_message("Pick a group first.", ephemeral=True)
-            return False
-        return True
+            return None
+        if self.selected_index is None:
+            await interaction.response.send_message("Pick a player first.", ephemeral=True)
+            return None
+        row = self._find_row(self.selected_index)
+        if row is None or row["fid"] is None:
+            await interaction.response.send_message("That player is no longer in this group.", ephemeral=True)
+            return None
+        return row
 
     async def _refresh(self, interaction: discord.Interaction):
         self._build_items()
@@ -640,65 +731,89 @@ class _OverrideView(discord.ui.View):
         if not self.groups:
             await interaction.followup.send("No groups to edit yet (no signups assigned).", ephemeral=True)
 
-    async def swap_prompt(self, interaction: discord.Interaction):
-        if await self._require_group(interaction):
-            await interaction.response.send_modal(_SwapModal(self))
-
-    async def lock_prompt(self, interaction: discord.Interaction):
-        if await self._require_group(interaction):
-            await interaction.response.send_modal(_SlotIndexModal(self, "Lock Slot", self.lock_confirm))
-
-    async def unlock_prompt(self, interaction: discord.Interaction):
-        if await self._require_group(interaction):
-            await interaction.response.send_modal(_SlotIndexModal(self, "Unlock Slot", self.unlock_confirm))
-
-    async def clear_prompt(self, interaction: discord.Interaction):
-        if await self._require_group(interaction):
-            await interaction.response.send_modal(_SlotIndexModal(self, "Clear Slot", self.clear_slot))
-
-    async def swap_slots(self, interaction: discord.Interaction, a: int, b: int):
-        row_a = self._find_row(a)
-        row_b = self._find_row(b)
-        if row_a is None or row_b is None:
-            await interaction.response.send_message(
-                "One or both slot indices do not exist in this group.", ephemeral=True)
+    async def lock(self, interaction: discord.Interaction):
+        row = await self._selected_row(interaction)
+        if row is None:
             return
-        kvkdb.set_slot(
-            self.conn, self.event_id, self.selected_type, self.selected_alliance, a, row_b["fid"], row_b["locked"])
-        kvkdb.set_slot(
-            self.conn, self.event_id, self.selected_type, self.selected_alliance, b, row_a["fid"], row_a["locked"])
+        kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                       self.selected_index, row["fid"], 1)
         await self._refresh(interaction)
 
-    async def toggle_lock(self, interaction: discord.Interaction, index: int, locked: int):
-        row = self._find_row(index)
+    async def unlock(self, interaction: discord.Interaction):
+        row = await self._selected_row(interaction)
         if row is None:
-            await interaction.response.send_message("Slot index not found in this group.", ephemeral=True)
             return
-        if locked and row["fid"] is None:
-            await interaction.response.send_message("Cannot lock an empty slot.", ephemeral=True)
-            return
-        kvkdb.set_slot(
-            self.conn, self.event_id, self.selected_type, self.selected_alliance, index, row["fid"], locked)
+        kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                       self.selected_index, row["fid"], 0)
         await self._refresh(interaction)
 
-    async def lock_confirm(self, interaction: discord.Interaction, index: int):
-        await self.toggle_lock(interaction, index, 1)
-
-    async def unlock_confirm(self, interaction: discord.Interaction, index: int):
-        await self.toggle_lock(interaction, index, 0)
-
-    async def clear_slot(self, interaction: discord.Interaction, index: int):
-        row = self._find_row(index)
+    async def remove(self, interaction: discord.Interaction):
+        row = await self._selected_row(interaction)
         if row is None:
-            await interaction.response.send_message("Slot index not found in this group.", ephemeral=True)
             return
-        kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance, index, None, 0)
+        kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                       self.selected_index, None, 0)
+        self.selected_index = None
+        await self._refresh(interaction)
+
+    async def move_prompt(self, interaction: discord.Interaction):
+        if await self._selected_row(interaction) is not None:
+            await interaction.response.send_modal(_MoveTimeModal(self))
+
+    async def do_move(self, interaction: discord.Interaction, time_text: str):
+        row = self._find_row(self.selected_index) if self.selected_index is not None else None
+        if row is None or row["fid"] is None:
+            await interaction.response.send_message("Pick a player first.", ephemeral=True)
+            return
+        slot_mode = self._slot_mode()
+        grid = generate_time_slots(slot_mode)
+        try:
+            picks = parse_desired_slots(time_text, slot_mode)
+        except ValueError:
+            picks = []
+        if len(picks) != 1:
+            await interaction.response.send_message("Enter a single time like 15:00.", ephemeral=True)
+            return
+        gi = picks[0]
+        new_time = grid[gi]
+        if self.free_mode:
+            # Kingdom grid: the target time is a real slot; swap the two slots' occupants.
+            target = self._find_row(gi)
+            if target is None:
+                await interaction.response.send_message("That time is not on the grid.", ephemeral=True)
+                return
+            kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                           self.selected_index, target["fid"], target["locked"])
+            kvkdb.set_slot(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                           gi, row["fid"], row["locked"])
+            self.selected_index = gi
+            await self._refresh(interaction)
+            return
+        # Alliance: slot_index is opaque, so rewrite the time. If a same-role player already holds that
+        # time, swap their times so no two of the same role collide.
+        role = row.get("role", "")
+        conflict = next(
+            (r for r in self._group_rows()
+             if r.get("role", "") == role and r["slot_time"] == new_time
+             and r["slot_index"] != self.selected_index), None)
+        if conflict:
+            kvkdb.set_slot_time(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                                conflict["slot_index"], row["slot_time"])
+        kvkdb.set_slot_time(self.conn, self.event_id, self.selected_type, self.selected_alliance,
+                            self.selected_index, new_time)
+        await self._refresh(interaction)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        self.player_page = max(0, self.player_page - 1)
+        await self._refresh(interaction)
+
+    async def next_page(self, interaction: discord.Interaction):
+        self.player_page += 1  # clamped in _build_items
         await self._refresh(interaction)
 
     async def rerun(self, interaction: discord.Interaction):
         self.report_cog._compute(self.conn, self.event_id)
         await self._refresh(interaction)
-
 
 
 class _ConfirmReportView(discord.ui.View):

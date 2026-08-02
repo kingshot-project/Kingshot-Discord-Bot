@@ -264,6 +264,16 @@ def set_slot(conn, event_id, position_type, alliance_id, slot_index, fid, locked
     conn.commit()
 
 
+def set_slot_time(conn, event_id, position_type, alliance_id, slot_index, slot_time) -> None:
+    """Change only the display time of a slot (used by the override Move). In alliance mode slot_index
+    is an opaque key and slot_time is the real time, so a Move rewrites slot_time, not slot_index."""
+    conn.execute(
+        """UPDATE kvk_slots SET slot_time = ?
+           WHERE event_id = ? AND position_type = ? AND alliance_id = ? AND slot_index = ?""",
+        (slot_time, event_id, position_type, alliance_id, slot_index))
+    conn.commit()
+
+
 def get_locks(conn, event_id, position_type, alliance_id):
     rows = conn.execute(
         """SELECT slot_index, fid FROM kvk_slots

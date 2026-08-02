@@ -334,7 +334,11 @@ def assign_alliance_slots(members, seats, slot_mode, locked=None):
             break
         if s["fid"] not in locked_fids:
             capped.append(s)
-    return place_on_grid(capped, slot_mode, locked=locked)
+    rows = place_on_grid(capped, slot_mode, locked=locked)
+    # slot_index is an opaque key; the real time lives in slot_time so a later Move can rewrite it.
+    for i, r in enumerate(rows):
+        r["slot_index"] = i
+    return rows
 
 
 def assign_two_tier(players, noble_slots, chief_slots):

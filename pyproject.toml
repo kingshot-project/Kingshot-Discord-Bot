@@ -1,0 +1,10 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [".venv", "venv", "docs", "db", "backups"]
+
+# Legacy code is grandfathered: existing violations are frozen in .ruff_baseline.txt
+# and CI lints only changed files (see .github/workflows/lint.yml). New/changed code
+# must pass the ruleset below.
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]

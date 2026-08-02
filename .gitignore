@@ -17,3 +17,7 @@
 !.github/
 !.github/workflows/
 !.github/workflows/docker.yml
+!.github/scripts/
+!.github/scripts/*.py
+!tests/
+!tests/*.py

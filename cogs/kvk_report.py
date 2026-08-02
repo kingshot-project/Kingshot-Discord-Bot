@@ -156,16 +156,17 @@ def _fmt_minutes(minutes: int) -> str:
 
 
 def _seat_points(conn, event_id, ev) -> dict:
-    """(fid, role) -> Training seat KvK points for a Pro event: Noble uses the stored (+50%) value,
-    Chief is recomputed at +10%. Empty for non-pro events. Keyed by (fid, role) and computed from
-    signups (not the slot row) so a manual Swap - which moves a fid to a different seat - shows the
-    right number without a Re-run."""
+    """(fid, role) -> (Training seat KvK points, speedup hours) for a Pro event: Noble uses the stored
+    (+50%) value, Chief is recomputed at +10%; the hours are the same either way. Empty for non-pro
+    events. Keyed by (fid, role) and computed from signups (not the slot row) so a manual Swap - which
+    moves a fid to a different seat - shows the right number without a Re-run."""
     if not ev["pro_mode"]:
         return {}
     points: dict = {}
     for s in kvkdb.get_signups(conn, event_id, "Training"):
-        points[(s["fid"], "noble")] = s.get("kvk_points") or 0
-        points[(s["fid"], "chief")] = _chief_points(s)
+        hours = _fmt_minutes(s["speedup_minutes"])
+        points[(s["fid"], "noble")] = (s.get("kvk_points") or 0, hours)
+        points[(s["fid"], "chief")] = (_chief_points(s), hours)
     return points
 
 
@@ -237,7 +238,8 @@ def _metric_map(conn, event_id, ev) -> dict:
         pro_training = bool(ev["pro_mode"]) and position_type == "Training"
         for s in kvkdb.get_signups(conn, event_id, position_type):
             metrics[(s["fid"], position_type)] = (
-                f"{(s['kvk_points'] or 0):,} pts" if pro_training else _fmt_minutes(s["speedup_minutes"]))
+                f"{(s['kvk_points'] or 0):,} pts, {_fmt_minutes(s['speedup_minutes'])}"
+                if pro_training else _fmt_minutes(s["speedup_minutes"]))
     return metrics
 
 
@@ -249,7 +251,8 @@ def _slot_line(row: dict, position_type: str, metric_map: dict, nicknames: dict,
     # looked up by (fid, role) so a Swap stays correct; otherwise use the shared metric (speedups).
     role = row.get("role", "")
     if role and (row["fid"], role) in seat_points:
-        metric = f"{seat_points[(row['fid'], role)]:,} pts"
+        pts, hours = seat_points[(row["fid"], role)]
+        metric = f"{pts:,} pts, {hours}"
     else:
         metric = metric_map.get((row["fid"], position_type), "?")
     lock = f" {_LOCK_MARK}" if row["locked"] else ""
@@ -366,7 +369,8 @@ def _signups_embeds(conn, event_id) -> list:
         for rank, s in enumerate(signups, 1):
             nick = nicknames.get(s["fid"], "Unknown")  # the fid is shown separately below
             pref = _fmt_desired(s.get("desired_slots", []), grid)
-            metric = f"{(s['kvk_points'] or 0):,} pts" if pro_training else format_speedups(s["speedup_minutes"])
+            metric = (f"{(s['kvk_points'] or 0):,} pts, {format_speedups(s['speedup_minutes'])}"
+                      if pro_training else format_speedups(s["speedup_minutes"]))
             lines.append(f"{rank}. {nick} ({s['fid']}) - **{metric}**{pref}")
         if not lines:
             lines = ["(no signups)"]

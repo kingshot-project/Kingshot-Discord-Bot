@@ -61,6 +61,13 @@ KVK_TRAIN_TIME = {1: 12, 2: 17, 3: 24, 4: 32, 5: 44, 6: 60, 7: 83, 8: 113, 9: 13
 KVK_POINTS = {1: 3, 2: 4, 3: 5, 4: 8, 5: 12, 6: 18, 7: 25, 8: 35, 9: 45, 10: 60, 11: 75}
 MAX_TROOP_LEVEL = 11
 
+# Training-speed bonuses shared by every player on the Training day, on top of a player's own speed.
+# All training-speed bonuses stack additively into one percentage (e.g. own 202.9 + 105 = 307.9%).
+KINGDOM_SKILL_BONUS = 30.0
+KVK_EVENT_BONUS = 25.0
+POSITION_TRAINING_BONUS = 50.0
+SHARED_TRAINING_BONUS = KINGDOM_SKILL_BONUS + KVK_EVENT_BONUS + POSITION_TRAINING_BONUS  # 105.0
+
 _COUNT_SUFFIX = {"k": 1000, "к": 1000, "m": 1_000_000, "м": 1_000_000}  # Latin + Cyrillic k/m
 
 

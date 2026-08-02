@@ -11,6 +11,7 @@ from discord.ext import commands
 from . import kvk_data as kvkdb
 from .kvk_util import (
     POSITION_TYPES,
+    SHARED_TRAINING_BONUS,
     TROOP_LEVELS,
     compute_training_points,
     format_speedups,
@@ -723,11 +724,14 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
                 "Could not read the hours. Use a format like '20h' or '1d 8h'.", ephemeral=True)
             return
         try:
-            training_speed = parse_percent(self.speed.component.value)
+            personal_speed = parse_percent(self.speed.component.value)
         except ValueError:
             await interaction.response.send_message(
                 "Could not read the training speed. Use a number like '202.9'.", ephemeral=True)
             return
+        # Kingdom skill, KvK bonus and the position buff apply to everyone; they stack on the player's
+        # own training speed into one total percentage that drives the point math.
+        total_speed = personal_speed + SHARED_TRAINING_BONUS
         upgrade_vals = self.upgrade.component.values
         upgrade_from = int(upgrade_vals[0]) if upgrade_vals else None
         try:
@@ -743,7 +747,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             return
         try:
             result = compute_training_points(
-                base_tier, hours_minutes, upgrade_from, upgrade_count, training_speed)
+                base_tier, hours_minutes, upgrade_from, upgrade_count, total_speed)
         except ValueError as exc:
             await interaction.response.send_message(f"{exc}. Fix and try again.", ephemeral=True)
             return
@@ -753,7 +757,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             self.cog.conn, self.event_id, self.fid, "Training", hours_minutes, interaction.user.id, submitted_at)
         kvkdb.set_pro_training(
             self.cog.conn, self.event_id, self.fid, base_label, upgrade_from, upgrade_count,
-            result["kvk_points"], training_speed)
+            result["kvk_points"], personal_speed)
 
         ev = kvkdb.get_event(self.cog.conn, self.event_id)
         embed = discord.Embed(
@@ -762,7 +766,11 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             color=discord.Color.green())
         embed.add_field(name="Base level", value=base_label, inline=True)
         embed.add_field(name="Hours", value=format_speedups(hours_minutes), inline=True)
-        embed.add_field(name="Training speed", value=f"{training_speed:g}%", inline=True)
+        embed.add_field(
+            name="Training speed",
+            value=f"{personal_speed:g}% + {SHARED_TRAINING_BONUS:g}% (kingdom/KvK/position) "
+                  f"= {total_speed:g}%",
+            inline=False)
         if upgrade_from is not None and result["upgraded"]:
             embed.add_field(
                 name="Upgrades",

@@ -1,6 +1,7 @@
 import pytest
 
 from cogs.kvk_util import (
+    SHARED_TRAINING_BONUS,
     compute_training_points,
     format_speedups,
     generate_time_slots,
@@ -62,6 +63,18 @@ def test_compute_training_points_with_speed_count_capped():
     r = compute_training_points(10, 80 * 60, upgrade_from=9, upgrade_count=13_714, training_speed=202.9)
     assert r["upgraded"] == 13_714 and r["upgrade_points"] == 205_710
     assert r["new_troops"] == 3_844 and r["kvk_points"] == 205_710 + 3_844 * 60  # 436350
+
+
+def test_shared_training_bonus_is_kingdom_kvk_position():
+    assert SHARED_TRAINING_BONUS == 105.0  # 30 kingdom + 25 KvK + 50 position
+
+
+def test_compute_training_points_full_stack():
+    # own 202.9% + shared 105% = 307.9% total: 80h stretches to 288000*4.079 = 1174752 s,
+    # floor(1174752 / 21) = 55940 upgrades = 839100 pts.
+    total = 202.9 + SHARED_TRAINING_BONUS
+    r = compute_training_points(10, 80 * 60, upgrade_from=9, upgrade_count=900_000, training_speed=total)
+    assert r["upgraded"] == 55_940 and r["kvk_points"] == 839_100
 
 
 def test_compute_training_points_speed_zero_matches_no_speed():

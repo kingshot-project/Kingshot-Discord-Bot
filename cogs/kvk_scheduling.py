@@ -697,7 +697,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         self.add_item(self.hours)
         self.speed = discord.ui.Label(
             text="Training speed %", description="Power > Bonus Overview > Military > Training speed",
-            component=discord.ui.TextInput(placeholder="202.9", max_length=10))
+            component=discord.ui.TextInput(placeholder="123%", max_length=10))
         self.add_item(self.speed)
         self.upgrade = discord.ui.Label(
             text="Upgrade from level (optional)",

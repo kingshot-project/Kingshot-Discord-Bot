@@ -252,13 +252,18 @@ def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nic
 
 
 def _fmt_desired(indices, times) -> str:
-    """Compact preferred-times suffix for a signup line, e.g. ' - wants 20:00-22:00 (5 slots)'."""
+    """Compact preferred-times suffix for a signup line, e.g. ' - any 1 of 5 slots (20:00-22:00)'.
+
+    The player marks slots they can take; the leader gives them one. So the wording says "any 1 of",
+    not "wants N", which would read as a request for that many slots."""
     picks = [times[i] for i in indices if 0 <= i < len(times)]
     if not picks:
         return ""
+    if len(picks) == 1:
+        return " - prefers " + picks[0]
     if len(picks) <= 4:
-        return " - wants " + ", ".join(picks)
-    return f" - wants {len(picks)} slots ({picks[0]} to {picks[-1]})"
+        return " - any 1 of " + ", ".join(picks)
+    return f" - any 1 of {len(picks)} slots ({picks[0]}-{picks[-1]})"
 
 
 def _signups_embeds(conn, event_id) -> list:

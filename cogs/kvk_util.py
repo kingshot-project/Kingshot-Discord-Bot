@@ -307,6 +307,36 @@ def rank_and_assign(signups, slot_count, slot_mode, locked=None):
     ]
 
 
+def place_on_grid(players, slot_mode, locked=None):
+    """Place the given players on the FULL day grid, honoring each player's desired slots, and return
+    only the occupied rows (in slot-index / time order). The caller has already limited the player
+    set to the number of seats; this turns those players into timed rows at their preferred slots."""
+    full_day = len(generate_time_slots(slot_mode))
+    return [r for r in rank_and_assign(players, full_day, slot_mode, locked=locked)
+            if r["fid"] is not None]
+
+
+def assign_alliance_slots(members, seats, slot_mode, locked=None):
+    """Pick the top `seats` ranked members (locked fids always kept) and place them on the full day
+    grid at their preferred times. Returns only the occupied rows.
+
+    Unlike the old "first N times" model (which mapped an alliance's N seats to slots 0..N-1 and so
+    dropped any desired time beyond slot N), a player's desired slot (e.g. 15:00) is honored. Ranks
+    by "score" when a member carries it (Pro points), else by speedups.
+    """
+    locked = dict(locked or {})
+    ranked = sorted(
+        members, key=lambda s: (-s.get("score", s["speedup_minutes"]), s["submitted_at"], s["fid"]))
+    locked_fids = set(locked.values())
+    capped = [s for s in ranked if s["fid"] in locked_fids]
+    for s in ranked:
+        if len(capped) >= seats:
+            break
+        if s["fid"] not in locked_fids:
+            capped.append(s)
+    return place_on_grid(capped, slot_mode, locked=locked)
+
+
 def assign_two_tier(players, noble_slots, chief_slots):
     """Place Training-day players into Noble Advisor and Chief Minister seats to MAXIMISE total KvK
     points. Each player carries "noble_points" (points in a Noble seat, +50%) and "chief_points" (in a

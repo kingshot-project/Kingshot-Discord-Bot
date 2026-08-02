@@ -5,6 +5,7 @@ import pytest
 from cogs.kvk_util import (
     CHIEF_TRAINING_BONUS,
     SHARED_TRAINING_BONUS,
+    assign_alliance_slots,
     assign_two_tier,
     compute_training_points,
     format_speedups,
@@ -14,6 +15,7 @@ from cogs.kvk_util import (
     parse_percent,
     parse_speedups,
     parse_troop_count,
+    place_on_grid,
     rank_and_assign,
     troop_tier,
     type_dates_for,
@@ -270,6 +272,39 @@ def test_rank_and_assign_locked_slot_blocks_desired():
     by_slot = {r["slot_index"]: (r["fid"], r["locked"]) for r in rank_and_assign(signups, 3, 0, locked={1: 9})}
     assert by_slot[1] == (9, 1)             # locked slot stays
     assert by_slot[0] == (1, 0)             # desired slot taken -> fallback to slot 0
+
+
+def test_place_on_grid_returns_occupied_only_at_preferred_time():
+    players = [{"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [30]}]
+    rows = place_on_grid(players, 0)
+    assert len(rows) == 1                                   # occupied-only, not the whole 48-slot day
+    assert rows[0]["fid"] == 1
+    assert rows[0]["slot_index"] == 30 and rows[0]["slot_time"] == "15:00"
+
+
+def test_assign_alliance_slots_honors_desired_beyond_seat_count():
+    # The reported bug: N seats meant slots 0..N-1, so a 15:00 (index 30) wish above N was dropped to 0.
+    members = [{"fid": 1, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": [30, 31]}]
+    rows = assign_alliance_slots(members, 2, 0)
+    assert len(rows) == 1 and rows[0]["fid"] == 1 and rows[0]["slot_time"] == "15:00"
+
+
+def test_assign_alliance_slots_caps_at_seats_by_rank():
+    members = [
+        {"fid": 1, "speedup_minutes": 300, "submitted_at": "t", "desired_slots": []},
+        {"fid": 2, "speedup_minutes": 200, "submitted_at": "t", "desired_slots": []},
+        {"fid": 3, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": []},
+    ]
+    assert {r["fid"] for r in assign_alliance_slots(members, 2, 0)} == {1, 2}   # weakest dropped
+
+
+def test_assign_alliance_slots_keeps_locked_outside_top():
+    members = [
+        {"fid": 1, "speedup_minutes": 300, "submitted_at": "t", "desired_slots": []},
+        {"fid": 3, "speedup_minutes": 100, "submitted_at": "t", "desired_slots": []},
+    ]
+    rows = assign_alliance_slots(members, 1, 0, locked={5: 3})   # 1 seat, but fid 3 is locked
+    assert 3 in {r["fid"] for r in rows}
 
 
 @pytest.mark.parametrize("minutes,text", [

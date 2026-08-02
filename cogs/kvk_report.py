@@ -113,13 +113,24 @@ def _chunk_lines(lines: list, limit: int) -> list:
     return chunks
 
 
-def _slot_line(row: dict, position_type: str, minutes_map: dict, nicknames: dict) -> str:
+def _metric_map(conn, event_id, ev) -> dict:
+    """Per (fid, position_type) metric shown on a slot line: KvK points for Pro training, else speedups."""
+    metrics: dict = {}
+    for position_type in kvkdb.get_active_types(conn, event_id):
+        pro_training = bool(ev["pro_mode"]) and position_type == "Training"
+        for s in kvkdb.get_signups(conn, event_id, position_type):
+            metrics[(s["fid"], position_type)] = (
+                f"{(s['kvk_points'] or 0):,} pts" if pro_training else _fmt_minutes(s["speedup_minutes"]))
+    return metrics
+
+
+def _slot_line(row: dict, position_type: str, metric_map: dict, nicknames: dict) -> str:
     if row["fid"] is None:
         return f"{row['slot_time']} - (empty)"
     nickname = nicknames.get(row["fid"], f"Unknown ({row['fid']})")
-    minutes = minutes_map.get((row["fid"], position_type), 0)
+    metric = metric_map.get((row["fid"], position_type), "?")
     lock = f" {_LOCK_MARK}" if row["locked"] else ""
-    return f"{row['slot_time']} - {nickname} ({row['fid']}) - {_fmt_minutes(minutes)}{lock}"
+    return f"{row['slot_time']} - {nickname} ({row['fid']}) - {metric}{lock}"
 
 
 def _add_paged_field(embeds: list, new_embed, used: int, name: str, value: str) -> int:
@@ -137,18 +148,18 @@ def _add_paged_field(embeds: list, new_embed, used: int, name: str, value: str) 
     return used + field_len
 
 
-def _type_embeds(ev: dict, position_type: str, rows: list, minutes_map: dict, nicknames: dict) -> list:
+def _type_embeds(ev: dict, position_type: str, rows: list, metric_map: dict, nicknames: dict) -> list:
     """One or more embeds for a single position type, paged under Discord's 6000-char embed cap."""
     groups: list = []
     if ev["scope"] == "kingdom":
-        lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in rows]
+        lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
         groups.append(("Kingdom", lines))
     else:
         by_alliance: dict = {}
         for r in rows:
             by_alliance.setdefault(r["alliance_id"], []).append(r)
         for aid in sorted(by_alliance):
-            lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in by_alliance[aid]]
+            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
             groups.append((f"Alliance {aid}", lines))
 
     title = f"{ev['name']} - {position_type}"
@@ -267,7 +278,7 @@ def _render_layouts(conn, event_id) -> list:
             discord.ui.TextDisplay(f"No event with id {event_id}."), accent_colour=discord.Color.red())
         return [_ScheduleLayout(container)]
 
-    minutes_map = kvkdb.get_signup_minutes(conn, event_id)
+    metric_map = _metric_map(conn, event_id, ev)
     slots = kvkdb.get_slots(conn, event_id)
     nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
     by_type: dict = {}
@@ -280,7 +291,7 @@ def _render_layouts(conn, event_id) -> list:
         rows = by_type.get(position_type, [])
         blocks: list = []
         if ev["scope"] == "kingdom":
-            lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in rows]
+            lines = [_slot_line(r, position_type, metric_map, nicknames) for r in rows]
             blocks.extend(("text", chunk) for chunk in _chunk_lines(lines, _TEXT_CHUNK))
         else:
             by_alliance: dict = {}
@@ -289,7 +300,7 @@ def _render_layouts(conn, event_id) -> list:
             for pos, aid in enumerate(sorted(by_alliance)):
                 if pos:  # a divider before every alliance after the first
                     blocks.append(("sep", ""))
-                lines = [_slot_line(r, position_type, minutes_map, nicknames) for r in by_alliance[aid]]
+                lines = [_slot_line(r, position_type, metric_map, nicknames) for r in by_alliance[aid]]
                 chunks = _chunk_lines(lines, _TEXT_CHUNK)
                 blocks.append(("text", f"**Alliance {aid}**\n{chunks[0]}"))
                 blocks.extend(("text", chunk) for chunk in chunks[1:])
@@ -368,7 +379,7 @@ class KvkReport(commands.Cog):
             return [discord.Embed(
                 title="Unknown event", description=f"No event with id {event_id}.", color=discord.Color.red())]
 
-        minutes_map = kvkdb.get_signup_minutes(conn, event_id)
+        metric_map = _metric_map(conn, event_id, ev)
         if slots is None:
             slots = kvkdb.get_slots(conn, event_id)
         nicknames = _nicknames_for({r["fid"] for r in slots if r["fid"] is not None})
@@ -379,7 +390,7 @@ class KvkReport(commands.Cog):
 
         embeds = []
         for position_type in kvkdb.get_active_types(conn, event_id):
-            embeds.extend(_type_embeds(ev, position_type, by_type.get(position_type, []), minutes_map, nicknames))
+            embeds.extend(_type_embeds(ev, position_type, by_type.get(position_type, []), metric_map, nicknames))
 
         skipped = sorted(set(_skipped_fids(conn, event_id, ev)))
         if skipped:

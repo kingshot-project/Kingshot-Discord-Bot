@@ -35,7 +35,8 @@ def test_signup_upsert_idempotent():
     kvk.upsert_signup(c, eid, 100, "Training", 900, 100, "t2")
     assert kvk.get_signups(c, eid, "Training") == [
         {"fid": 100, "speedup_minutes": 900, "submitted_at": "t2", "desired_slots": [],
-         "base_level": None, "upgrade_from": None, "upgrade_count": None, "kvk_points": None}]
+         "base_level": None, "upgrade_from": None, "upgrade_count": None, "kvk_points": None,
+         "training_speed": None}]
 
 
 def test_desired_slots_roundtrip_and_preserved_on_reupsert():
@@ -127,7 +128,8 @@ def test_delete_event_removes_all_related_rows():
     assert kvk.get_active_types(c, keep) == ["Training"]
     assert kvk.get_signups(c, keep, "Training") == [
         {"fid": 1, "speedup_minutes": 10, "submitted_at": "t", "desired_slots": [],
-         "base_level": None, "upgrade_from": None, "upgrade_count": None, "kvk_points": None}]
+         "base_level": None, "upgrade_from": None, "upgrade_count": None, "kvk_points": None,
+         "training_speed": None}]
 
 
 def test_pro_mode_and_pro_training():
@@ -138,10 +140,11 @@ def test_pro_mode_and_pro_training():
         created_by=1, created_at="c", pro_mode=1)
     assert kvk.get_event(c, eid)["pro_mode"] == 1
     kvk.upsert_signup(c, eid, 7, "Training", 1200, 7, "t")  # 20h as speedup_minutes
-    kvk.set_pro_training(c, eid, 7, "T10-TG3", 9, 900_000, 51420)
+    kvk.set_pro_training(c, eid, 7, "T10-TG3", 9, 900_000, 51420, 202.9)
     s = kvk.get_signups(c, eid, "Training")[0]
     assert s["base_level"] == "T10-TG3" and s["upgrade_from"] == 9
     assert s["upgrade_count"] == 900_000 and s["kvk_points"] == 51420
+    assert s["training_speed"] == 202.9
     # A re-submit of speedups keeps the pro-training fields (ON CONFLICT preserves them)
     kvk.upsert_signup(c, eid, 7, "Training", 1800, 7, "t2")
     assert kvk.get_signups(c, eid, "Training")[0]["kvk_points"] == 51420

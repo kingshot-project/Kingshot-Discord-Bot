@@ -84,34 +84,57 @@ def parse_troop_count(text: str) -> int:
     return int(value)
 
 
-def compute_training_points(base_level, hours_minutes, upgrade_from=None, upgrade_count=0) -> dict:
+def parse_percent(text) -> float:
+    """Parse a training-speed percentage like '202.9', '+202.9%' or '202,9'. Rejects negatives."""
+    s = str(text).strip().rstrip("%").strip().lstrip("+").replace(",", ".").strip()
+    if not s:
+        raise ValueError("empty percentage")
+    try:
+        value = float(s)
+    except ValueError as exc:
+        raise ValueError(f"not a number: {text!r}") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"percentage must be a non-negative finite number: {text!r}")
+    return value
+
+
+def compute_training_points(base_level, hours_minutes, upgrade_from=None, upgrade_count=0,
+                            training_speed=0.0) -> dict:
     """KvK training-day points from speedup time, honoring optional troop upgrades first.
 
     Upgrades (upgrade_count troops from upgrade_from up to base_level) each take
     training_time[base] - training_time[from] seconds and earn points[base] - points[from]. Only as
     many as the speedup time allows are upgraded; the rest of the time trains new base-level troops
     (points[base] each). Returns a breakdown dict; the total is under "kvk_points".
+
+    training_speed is a percentage bonus (e.g. 202.9 for +202.9%): it stretches the speedup budget
+    to total_seconds * (1 + training_speed/100), so more troops fit. The per-troop time stays at its
+    exact fraction (the game floors only the running total, e.g. 1/2/3/4 upgrades show 6/13/20/27 s
+    for a 6.9333 s troop) - so the troop count is floor(effective_time / raw_seconds_per_troop),
+    which is what floor division below computes. It scales upgrades and new troops alike.
     """
     if base_level not in KVK_POINTS:
         raise ValueError(f"unknown troop level: {base_level}")
     total_seconds = max(0, int(hours_minutes)) * 60
-    base_time = KVK_TRAIN_TIME[base_level]
+    speed_mult = 1.0 + max(0.0, float(training_speed)) / 100.0
+    effective = total_seconds * speed_mult  # speedups reach further with training speed
+    raw_base_time = KVK_TRAIN_TIME[base_level]
     base_points = KVK_POINTS[base_level]
 
     upgraded = 0
     upgrade_points = 0
-    remaining = total_seconds
+    remaining = effective
     if upgrade_count and upgrade_count > 0 and upgrade_from is not None:
         if upgrade_from not in KVK_POINTS:
             raise ValueError(f"unknown upgrade level: {upgrade_from}")
         if upgrade_from >= base_level:
             raise ValueError("upgrade level must be below the base troop level")
-        time_each = base_time - KVK_TRAIN_TIME[upgrade_from]  # positive: times increase with tier
-        upgraded = min(upgrade_count, remaining // time_each)
+        time_each = raw_base_time - KVK_TRAIN_TIME[upgrade_from]  # raw seconds, before training speed
+        upgraded = min(upgrade_count, int(remaining // time_each))
         remaining -= upgraded * time_each
         upgrade_points = upgraded * (base_points - KVK_POINTS[upgrade_from])
 
-    new_troops = remaining // base_time
+    new_troops = int(remaining // raw_base_time)
     new_points = new_troops * base_points
     return {
         "kvk_points": upgrade_points + new_points,

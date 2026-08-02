@@ -35,6 +35,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             speedup_minutes INTEGER NOT NULL, submitted_by INTEGER NOT NULL, submitted_at TEXT NOT NULL,
             desired_slots TEXT NOT NULL DEFAULT '',
             base_level TEXT, upgrade_from INTEGER, upgrade_count INTEGER, kvk_points INTEGER,
+            training_speed REAL,
             PRIMARY KEY (event_id, fid, position_type)
         );
         CREATE TABLE IF NOT EXISTS kvk_slots (
@@ -51,6 +52,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column(conn, "kvk_signups", "upgrade_from", "INTEGER")
     _add_column(conn, "kvk_signups", "upgrade_count", "INTEGER")
     _add_column(conn, "kvk_signups", "kvk_points", "INTEGER")
+    _add_column(conn, "kvk_signups", "training_speed", "REAL")
     _add_column(conn, "kvk_events", "pro_mode", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
@@ -160,23 +162,25 @@ def _parse_slot_csv(csv):
     return [int(x) for x in csv.split(",") if x.strip()] if csv else []
 
 
-def set_pro_training(conn, event_id, fid, base_level, upgrade_from, upgrade_count, kvk_points) -> None:
+def set_pro_training(conn, event_id, fid, base_level, upgrade_from, upgrade_count, kvk_points,
+                     training_speed) -> None:
     """Store the Pro-mode training-day inputs and computed points on an existing Training signup."""
     conn.execute(
-        "UPDATE kvk_signups SET base_level = ?, upgrade_from = ?, upgrade_count = ?, kvk_points = ? "
-        "WHERE event_id = ? AND fid = ? AND position_type = 'Training'",
-        (base_level, upgrade_from, upgrade_count, kvk_points, event_id, fid))
+        "UPDATE kvk_signups SET base_level = ?, upgrade_from = ?, upgrade_count = ?, kvk_points = ?, "
+        "training_speed = ? WHERE event_id = ? AND fid = ? AND position_type = 'Training'",
+        (base_level, upgrade_from, upgrade_count, kvk_points, training_speed, event_id, fid))
     conn.commit()
 
 
 def get_signups(conn, event_id, position_type):
     rows = conn.execute(
         "SELECT fid, speedup_minutes, submitted_at, desired_slots, base_level, upgrade_from, "
-        "upgrade_count, kvk_points FROM kvk_signups WHERE event_id = ? AND position_type = ?",
+        "upgrade_count, kvk_points, training_speed FROM kvk_signups "
+        "WHERE event_id = ? AND position_type = ?",
         (event_id, position_type)).fetchall()
     return [{"fid": r[0], "speedup_minutes": r[1], "submitted_at": r[2],
              "desired_slots": _parse_slot_csv(r[3]), "base_level": r[4], "upgrade_from": r[5],
-             "upgrade_count": r[6], "kvk_points": r[7]} for r in rows]
+             "upgrade_count": r[6], "kvk_points": r[7], "training_speed": r[8]} for r in rows]
 
 
 def get_signup_minutes(conn, event_id):

@@ -16,6 +16,7 @@ from .kvk_util import (
     format_speedups,
     generate_time_slots,
     parse_desired_slots,
+    parse_percent,
     parse_speedups,
     parse_troop_count,
     troop_tier,
@@ -693,6 +694,10 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             text="Hours of speedups", description="e.g. 20h or 1d 8h",
             component=discord.ui.TextInput(placeholder="20h", max_length=50))
         self.add_item(self.hours)
+        self.speed = discord.ui.Label(
+            text="Training speed %", description="your training-speed bonus, e.g. 202.9",
+            component=discord.ui.TextInput(placeholder="202.9", max_length=10))
+        self.add_item(self.speed)
         self.upgrade = discord.ui.Label(
             text="Upgrade from level (optional)",
             component=discord.ui.Select(
@@ -717,6 +722,12 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             await interaction.response.send_message(
                 "Could not read the hours. Use a format like '20h' or '1d 8h'.", ephemeral=True)
             return
+        try:
+            training_speed = parse_percent(self.speed.component.value)
+        except ValueError:
+            await interaction.response.send_message(
+                "Could not read the training speed. Use a number like '202.9'.", ephemeral=True)
+            return
         upgrade_vals = self.upgrade.component.values
         upgrade_from = int(upgrade_vals[0]) if upgrade_vals else None
         try:
@@ -731,7 +742,8 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
                 ephemeral=True)
             return
         try:
-            result = compute_training_points(base_tier, hours_minutes, upgrade_from, upgrade_count)
+            result = compute_training_points(
+                base_tier, hours_minutes, upgrade_from, upgrade_count, training_speed)
         except ValueError as exc:
             await interaction.response.send_message(f"{exc}. Fix and try again.", ephemeral=True)
             return
@@ -740,7 +752,8 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
         kvkdb.upsert_signup(
             self.cog.conn, self.event_id, self.fid, "Training", hours_minutes, interaction.user.id, submitted_at)
         kvkdb.set_pro_training(
-            self.cog.conn, self.event_id, self.fid, base_label, upgrade_from, upgrade_count, result["kvk_points"])
+            self.cog.conn, self.event_id, self.fid, base_label, upgrade_from, upgrade_count,
+            result["kvk_points"], training_speed)
 
         ev = kvkdb.get_event(self.cog.conn, self.event_id)
         embed = discord.Embed(
@@ -749,6 +762,7 @@ class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):
             color=discord.Color.green())
         embed.add_field(name="Base level", value=base_label, inline=True)
         embed.add_field(name="Hours", value=format_speedups(hours_minutes), inline=True)
+        embed.add_field(name="Training speed", value=f"{training_speed:g}%", inline=True)
         if upgrade_from is not None and result["upgraded"]:
             embed.add_field(
                 name="Upgrades",

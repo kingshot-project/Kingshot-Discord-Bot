@@ -5,6 +5,7 @@ from cogs.kvk_util import (
     format_speedups,
     generate_time_slots,
     parse_desired_slots,
+    parse_percent,
     parse_speedups,
     parse_troop_count,
     rank_and_assign,
@@ -42,6 +43,45 @@ def test_compute_training_points_upgrade_fits():
 def test_compute_training_points_bad(kwargs):
     with pytest.raises(ValueError):
         compute_training_points(**kwargs)
+
+
+def test_compute_training_points_with_speed_time_capped():
+    # base T10, 80h (4800 min), upgrade from T9, huge stock, training speed +202.9%.
+    # Training speed stretches the 288000 s budget to 288000*3.029 = 872352 s. Per-upgrade cost stays
+    # the raw 21 s (the game only floors the running total: 1/2/3/4 troops show 6/13/20/27 s), so the
+    # count is floor(872352 / 21) = 41540 - NOT floor(288000 / 6) = 48000 from flooring each troop.
+    r = compute_training_points(10, 80 * 60, upgrade_from=9, upgrade_count=900_000, training_speed=202.9)
+    assert r["upgraded"] == 41540
+    assert r["kvk_points"] == 41540 * 15 == 623_100
+    assert r["new_troops"] == 0
+
+
+def test_compute_training_points_with_speed_count_capped():
+    # Same but only 13714 T9 in stock: upgrade them all, spend the rest of the stretched budget on
+    # new T10 troops (raw 152 s each).
+    r = compute_training_points(10, 80 * 60, upgrade_from=9, upgrade_count=13_714, training_speed=202.9)
+    assert r["upgraded"] == 13_714 and r["upgrade_points"] == 205_710
+    assert r["new_troops"] == 3_844 and r["kvk_points"] == 205_710 + 3_844 * 60  # 436350
+
+
+def test_compute_training_points_speed_zero_matches_no_speed():
+    a = compute_training_points(10, 20 * 60, upgrade_from=9, upgrade_count=900_000)
+    b = compute_training_points(10, 20 * 60, upgrade_from=9, upgrade_count=900_000, training_speed=0)
+    assert a == b
+
+
+@pytest.mark.parametrize("text,value", [
+    ("202.9", 202.9), ("+202.9%", 202.9), ("202,9", 202.9), ("0", 0.0),
+    ("100", 100.0), ("  50% ", 50.0),
+])
+def test_parse_percent_ok(text, value):
+    assert parse_percent(text) == value
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-5", "inf", "nan", "1e999", "%"])
+def test_parse_percent_bad(bad):
+    with pytest.raises(ValueError):
+        parse_percent(bad)
 
 
 @pytest.mark.parametrize("text,count", [

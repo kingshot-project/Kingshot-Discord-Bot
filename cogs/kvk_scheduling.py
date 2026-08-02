@@ -285,6 +285,8 @@ class _SlotModeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.wizard_view.draft.slot_mode = int(self.values[0])
+        for opt in self.options:  # keep the choice shown after the view refreshes
+            opt.default = opt.value == self.values[0]
         await self.wizard_view.refresh(interaction)
 
 
@@ -301,6 +303,8 @@ class _ProModeSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.wizard_view.draft.pro_mode = int(self.values[0])
+        for opt in self.options:  # keep the choice shown after the view refreshes
+            opt.default = opt.value == self.values[0]
         await self.wizard_view.refresh(interaction)
 
 
@@ -314,6 +318,8 @@ class _TypesSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.wizard_view.draft.active_types = list(self.values)
+        for opt in self.options:  # keep the picks shown after the view refreshes
+            opt.default = opt.value in self.values
         await self.wizard_view.refresh(interaction)
 
 
@@ -327,6 +333,8 @@ class _PublishChannelSelect(discord.ui.ChannelSelect):
 
     async def callback(self, interaction: discord.Interaction):
         self.wizard_view.draft.publish_channel_id = self.values[0].id
+        self.default_values = [  # keep the channel shown after the view refreshes
+            discord.SelectDefaultValue(id=self.values[0].id, type=discord.SelectDefaultValueType.channel)]
         await self.wizard_view.refresh(interaction)
 
 

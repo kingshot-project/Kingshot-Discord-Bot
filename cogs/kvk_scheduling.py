@@ -197,7 +197,7 @@ class KvkScheduling(commands.Cog):
 
         view = _SignupTypesView(self, event_id, fid, active_types)
         await self._send_or_edit(
-            interaction, "Pick position types to sign up for (up to 3), then press Enter speedups.",
+            interaction, "Pick position types to sign up for (up to 3), then press Enter signup.",
             view=view, edit=edit)
 
     @staticmethod
@@ -638,7 +638,7 @@ class _SignupTypeSelect(discord.ui.Select):
             opt.default = opt.value in self.values
         await interaction.response.edit_message(
             content=f"Picked: {', '.join(self.types_view.selected_types)}. "
-                    f"Press Enter speedups to submit your times.",
+                    f"Press Enter signup to submit your speedups and times.",
             view=self.types_view)
 
 
@@ -652,7 +652,7 @@ class _SignupTypesView(discord.ui.View):
         self.fid = fid
         self.selected_types: list[str] = []
         self.add_item(_SignupTypeSelect(self, active_types))
-        enter_button = discord.ui.Button(label="Enter speedups", style=discord.ButtonStyle.primary)
+        enter_button = discord.ui.Button(label="Enter signup", style=discord.ButtonStyle.primary)
         enter_button.callback = self.enter_speedups
         self.add_item(enter_button)
 
@@ -680,6 +680,14 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             text_input = discord.ui.TextInput(label=f"{position_type} speedup (e.g. 7d 12h)", max_length=50)
             self.speedup_inputs[position_type] = text_input
             self.add_item(text_input)
+        # Standard signup folds preferred times into this modal so it is one step, not a follow-up.
+        # One shared field applies to every picked position (pro events use the hub's own step instead).
+        self.times_input: discord.ui.TextInput | None = None
+        if hub is None:
+            self.times_input = discord.ui.TextInput(
+                label="Preferred times (optional)", required=False, max_length=100,
+                placeholder="e.g. 20:00-22:00, 23:30 (blank = any slot)")
+            self.add_item(self.times_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         parsed: dict[str, int] = {}
@@ -689,6 +697,18 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             except ValueError:
                 await interaction.response.send_message(
                     f"Could not read the {position_type} speedup value. Use a format like '7d 12h'.",
+                    ephemeral=True)
+                return
+
+        # Standard signup carries preferred times in this modal; validate them before saving anything.
+        ev = kvkdb.get_event(self.cog.conn, self.event_id) if self.hub is None else None
+        desired_indices: list[int] = []
+        if ev and self.times_input is not None and (self.times_input.value or "").strip():
+            try:
+                desired_indices = parse_desired_slots(self.times_input.value, ev["slot_mode"])
+            except ValueError:
+                await interaction.response.send_message(
+                    "Could not read the preferred times. Use a format like '20:00-22:00, 23:30'.",
                     ephemeral=True)
                 return
 
@@ -705,7 +725,11 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
                 await self.hub.mark_done(position_type)
             return
 
-        ev = kvkdb.get_event(self.cog.conn, self.event_id)
+        if desired_indices:  # same picks apply to every position the player signed up for
+            joined = ",".join(str(i) for i in desired_indices)
+            for position_type in parsed:
+                kvkdb.set_desired_slots(self.cog.conn, self.event_id, self.fid, position_type, joined)
+
         event_name = ev["name"] if ev else str(self.event_id)
         embed = discord.Embed(
             title=f"{theme.verifiedIcon} Signup saved",
@@ -713,11 +737,13 @@ class _SignupSpeedupModal(discord.ui.Modal, title="KvK Signup Speedups"):
             color=discord.Color.green())
         for position_type, minutes in parsed.items():
             embed.add_field(name=position_type, value=format_speedups(minutes), inline=True)
-        view = None
-        if ev:
-            embed.set_footer(text="Optional: add preferred times to say which slots you want.")
-            view = _PreferredTimesEntryView(self.cog, self.event_id, self.fid, list(parsed.keys()))
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        if desired_indices and ev:
+            times = generate_time_slots(ev["slot_mode"])
+            picks = [times[i] for i in desired_indices if i < len(times)]
+            embed.add_field(
+                name=f"{theme.timeIcon} Preferred times",
+                value=", ".join(picks) if picks else "(any slot)", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class _ProTrainingModal(discord.ui.Modal, title="KvK Pro Training"):

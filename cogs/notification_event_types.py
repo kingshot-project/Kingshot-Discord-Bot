@@ -124,8 +124,8 @@ EVENT_CONFIG = {
     "Eternity's Reach": {
         "emoji": "♾️",
         "duration_minutes": 30,
-        "schedule_type": "global_monthly",
-        "fixed_days": "Monthly on Tuesday",
+        "schedule_type": "global_biweekly",
+        "fixed_days": "Every 2 weeks on Tuesday",
         "reference_date": "2025-11-18",
         "cycle_weeks": 4,
         "available_times": ["03:00", "05:00", "11:00", "14:00", "16:00", "18:00", "21:00"],

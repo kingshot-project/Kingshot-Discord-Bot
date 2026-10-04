@@ -8,7 +8,7 @@ import logging
 import re
 from .alliance_member_operations import AllianceSelectView
 from .permission_handler import PermissionManager
-from .pimp_my_bot import theme
+from .pimp_my_bot import theme, menu_timeout
 from . import alliance_power_changes
 
 logger = logging.getLogger('alliance')
@@ -62,7 +62,7 @@ class _SingleHistoryResultView(discord.ui.View):
     """Wraps a single-member history embed with Back + Post to Channel."""
 
     def __init__(self, cog, alliance_id, history_type: str, embed: discord.Embed):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.alliance_id = alliance_id
         self.history_type = history_type  # "furnace", "nickname", "power", or "combat_power"
@@ -101,7 +101,7 @@ class _PostToChannelPickerView(discord.ui.View):
     PAGE_SIZE = 25
 
     def __init__(self, channels, embed_to_post, requester):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.channels = list(channels)
         self.embed_to_post = embed_to_post
         self.requester = requester
@@ -762,7 +762,7 @@ class HistoryTypeView(discord.ui.View):
     """Hub-context history-type picker — alliance is already known."""
 
     def __init__(self, cog, alliance_id: int):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.alliance_id = alliance_id
 
@@ -800,7 +800,7 @@ class HistoryTypeView(discord.ui.View):
 
 class MemberListView(discord.ui.View):
     def __init__(self, cog, members, alliance_name, alliance_id=None):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.members = members
         self.alliance_name = alliance_name
@@ -1045,7 +1045,7 @@ class FurnaceHistoryIDSearchModal(discord.ui.Modal, title="Search by ID"):
 
 class MemberListViewNickname(discord.ui.View):
     def __init__(self, cog, members, alliance_name, alliance_id=None):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.members = members
         self.alliance_name = alliance_name
@@ -1290,7 +1290,7 @@ class NicknameHistoryIDSearchModal(discord.ui.Modal, title="Search by ID"):
 
 class MemberListViewPower(discord.ui.View):
     def __init__(self, cog, members, alliance_name, alliance_id, metric):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.members = members
         self.alliance_name = alliance_name
@@ -1458,7 +1458,7 @@ class CustomTimeModal(discord.ui.Modal, title="Custom Time Range"):
 class RecentChangesView(discord.ui.View):
     def __init__(self, chunks, members, level_mapping, alliance_name, time,
                  cog=None, alliance_id=None):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.chunks = chunks
         self.members = members
         self.level_mapping = level_mapping
@@ -1529,7 +1529,7 @@ class RecentChangesView(discord.ui.View):
 class RecentNicknameChangesView(discord.ui.View):
     def __init__(self, chunks, members, alliance_name, time,
                  cog=None, alliance_id=None):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=menu_timeout())
         self.chunks = chunks
         self.members = members
         self.alliance_name = alliance_name

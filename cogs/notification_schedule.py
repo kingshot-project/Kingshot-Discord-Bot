@@ -13,7 +13,7 @@ import logging
 import asyncio
 from .notification_event_types import get_event_icon, get_instance_display_name
 from .permission_handler import PermissionManager
-from .pimp_my_bot import theme, safe_edit_message
+from .pimp_my_bot import theme, safe_edit_message, menu_timeout, confirm_timeout
 
 class NotificationSchedule(commands.Cog):
     def __init__(self, bot):
@@ -1306,7 +1306,7 @@ class ScheduleBoardPaginationView(discord.ui.View):
 class ScheduleBoardMainView(discord.ui.View):
     """Main menu for schedule board management"""
     def __init__(self, cog, guild_id: int, boards: list):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.boards = boards
@@ -1363,7 +1363,7 @@ class ScheduleBoardMainView(discord.ui.View):
 class CreateBoardTypeView(discord.ui.View):
     """Step 1: Select board type with buttons"""
     def __init__(self, cog, guild_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
 
@@ -1420,7 +1420,7 @@ class CreateBoardTypeView(discord.ui.View):
 class CreateBoardChannelSelectView(discord.ui.View):
     """Step 2: Select channels (target channel + display channel)"""
     def __init__(self, cog, guild_id: int, board_type: str):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.board_type = board_type
@@ -1527,7 +1527,7 @@ class CreateBoardSettingsView(discord.ui.View):
     """Step 3: Configure board settings with buttons"""
     def __init__(self, cog, guild_id: int, board_type: str, target_channel_id: int,
                  display_channel_id: int, creator_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.board_type = board_type
@@ -1899,7 +1899,7 @@ class CreateBoardSettingsView(discord.ui.View):
 class BoardCreatedSuccessView(discord.ui.View):
     """View shown after successfully creating a board"""
     def __init__(self, cog, guild_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
 
@@ -1915,7 +1915,7 @@ class BoardCreatedSuccessView(discord.ui.View):
 class BoardSelectionView(discord.ui.View):
     """View to select which board to manage"""
     def __init__(self, cog, guild_id: int, boards: list, guild: discord.Guild = None):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.boards = boards
@@ -1994,7 +1994,7 @@ class BoardSelectionView(discord.ui.View):
 class BoardManagementView(discord.ui.View):
     """View to manage a specific board (edit/delete/move/preview)"""
     def __init__(self, cog, guild_id: int, board_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.board_id = board_id
@@ -2105,7 +2105,7 @@ class BoardManagementView(discord.ui.View):
 
             channel_select.callback = channel_callback
 
-            view = discord.ui.View(timeout=60)
+            view = discord.ui.View(timeout=confirm_timeout())
             view.add_item(channel_select)
 
             await interaction.response.edit_message(
@@ -2148,7 +2148,7 @@ class BoardManagementView(discord.ui.View):
 
             channel_select.callback = channel_callback
 
-            view = discord.ui.View(timeout=60)
+            view = discord.ui.View(timeout=confirm_timeout())
             view.add_item(channel_select)
 
             await interaction.response.edit_message(
@@ -2176,11 +2176,7 @@ class BoardManagementView(discord.ui.View):
         try:
             await interaction.response.defer(ephemeral=True)
             embed = await self.cog.generate_schedule_embed(self.board_id, page=0)
-            await interaction.followup.send(
-                "**Preview of schedule board:**",
-                embed=embed,
-                ephemeral=True
-            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
             self.cog.logger.error(f"[ERROR] Error in preview: {e}")
             print(f"[ERROR] Error in preview: {e}")
@@ -2209,7 +2205,7 @@ class BoardManagementView(discord.ui.View):
 class EditBoardSettingsView(discord.ui.View):
     """Interactive view to edit board settings with buttons"""
     def __init__(self, cog, board_id: int, guild_id: int):
-        super().__init__(timeout=300)
+        super().__init__(timeout=menu_timeout())
         self.cog = cog
         self.board_id = board_id
         self.guild_id = guild_id
@@ -2645,7 +2641,7 @@ class EditBoardSettingsView(discord.ui.View):
 class ConfirmDeleteView(discord.ui.View):
     """Confirmation view for deleting a board"""
     def __init__(self, cog, guild_id: int, board_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=confirm_timeout())
         self.cog = cog
         self.guild_id = guild_id
         self.board_id = board_id

@@ -504,7 +504,7 @@ class CreateGiftCodeModal(discord.ui.Modal):
                 try:
                     date = datetime.now().strftime("%Y-%m-%d")
                     self.cog.cursor.execute(
-                        "INSERT INTO gift_codes (giftcode, date, validation_status) VALUES (?, ?, ?)",
+                        "INSERT OR IGNORE INTO gift_codes (giftcode, date, validation_status) VALUES (?, ?, ?)",
                         (code, date, "pending")
                     )
                     self.cog.conn.commit()
@@ -629,6 +629,7 @@ class GiftView(discord.ui.View):
                 description=f"Apply to all {len(alliances_with_counts)} alliances",
                 emoji=theme.globeIcon
             ))
+            view.current_select.options = view.current_select.options[:25]
 
             async def alliance_callback(select_interaction: discord.Interaction, alliance_id=None):
                 try:
@@ -689,7 +690,7 @@ class GiftView(discord.ui.View):
                                 value=code,
                                 description=f"Created: {date}",
                                 emoji=theme.giftIcon
-                            ) for code, date in gift_codes
+                            ) for code, date in gift_codes[:24]
                         ]
                     )
 
